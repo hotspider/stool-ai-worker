@@ -1,6 +1,7 @@
 export interface Env {
   OPENAI_API_KEY: string;
   OPENAI_PROXY_URL?: string;
+  WORKER_VERSION?: string;
 }
 
 type Locale = "zh" | "en" | "ja" | "ko" | "fr" | "de" | "es" | "id" | "th";
@@ -82,6 +83,8 @@ function t(locale: Locale, key: string): string {
   };
   return dict[locale][key] || dict.en[key] || key;
 }
+
+const SCHEMA_VERSION = 2;
 
 function extractOutputText(data: any): string {
   if (typeof data?.output_text === "string" && data.output_text.trim()) {
@@ -170,6 +173,8 @@ const SYSTEM_PROMPT = `
 function buildDefaultResult() {
   return {
     ok: true,
+    schema_version: SCHEMA_VERSION,
+    worker_version: "",
     headline: "",
     score: 50,
     risk_level: "low",
@@ -195,10 +200,10 @@ function buildDefaultResult() {
       summary: "",
       tags: [],
       sections: [
-        { title: "饮食", items: [] },
-        { title: "补液", items: [] },
-        { title: "护理", items: [] },
-        { title: "警戒信号", items: [] },
+        { title: "饮食", icon_key: "diet", items: [] },
+        { title: "补液", icon_key: "hydration", items: [] },
+        { title: "护理", icon_key: "care", items: [] },
+        { title: "警戒信号", icon_key: "warning", items: [] },
       ],
     },
     summary: "",
@@ -210,25 +215,84 @@ function buildDefaultResult() {
   };
 }
 
-function normalizeResult(parsed: any) {
+const DEFAULT_REASONING = [
+  "图片角度或光线可能影响判断准确性",
+  "结合近期饮食与症状信息综合分析",
+  "当前结果更像短期饮食或消化变化",
+  "建议持续记录 24-48 小时变化",
+  "如出现不适或异常症状需及时就医",
+];
+
+const DEFAULT_DIET = ["清淡易消化饮食", "少量多餐，观察耐受"];
+const DEFAULT_HYDRATION = ["少量多次补液", "观察尿量是否减少"];
+const DEFAULT_CARE = ["便后温水清洁并保持干爽", "注意皮肤红肿或破损"];
+const DEFAULT_AVOID = ["避免油炸/辛辣/高糖食物", "暂避冰冷刺激饮品"];
+const DEFAULT_RED_FLAGS = [
+  { title: "明显便血或黑便", detail: "若出现请尽快就医" },
+  { title: "持续高热或精神萎靡", detail: "超过 24 小时需就医" },
+  { title: "频繁呕吐或无法进食", detail: "提示脱水风险" },
+  { title: "尿量明显减少/口干", detail: "可能存在脱水" },
+  { title: "腹痛剧烈或持续哭闹", detail: "需及时评估" },
+];
+const DEFAULT_FOLLOW_UPS = [
+  "是否发热？",
+  "是否持续呕吐？",
+  "24 小时内排便次数多少？",
+  "是否出现便血/黑便/灰白便？",
+  "尿量是否减少？",
+  "最近饮食是否有明显变化？",
+];
+
+function ensureMinItems<T>(list: T[], min: number, defaults: T[]) {
+  const out = Array.isArray(list) ? list.slice() : [];
+  let i = 0;
+  while (out.length < min) {
+    out.push(defaults[i % defaults.length]);
+    i += 1;
+  }
+  return out;
+}
+
+function ensureMinRedFlags(
+  list: Array<{ title: string; detail: string }>,
+  min: number
+) {
+  const out = Array.isArray(list) ? list.slice() : [];
+  let i = 0;
+  while (out.length < min) {
+    out.push(DEFAULT_RED_FLAGS[i % DEFAULT_RED_FLAGS.length]);
+    i += 1;
+  }
+  return out;
+}
+
+function normalizeV2(parsed: any, workerVersion: string, proxyVersion?: string) {
   const base = buildDefaultResult();
-  const out = { ...base, ...(parsed || {}) };
+  const out = { ...base, ...(parsed || {}) } as any;
 
   const stool = { ...base.stool_features, ...(out.stool_features || {}) };
   const actions = { ...base.actions_today, ...(out.actions_today || {}) };
   const ui = { ...base.ui_strings, ...(out.ui_strings || {}) };
 
   out.ok = out.ok === false ? false : true;
+  out.schema_version = SCHEMA_VERSION;
+  out.worker_version = out.worker_version || workerVersion;
+  if (proxyVersion) {
+    out.proxy_version = proxyVersion;
+  }
+
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
-  out.risk_level = ["low", "medium", "high"].includes(out.risk_level)
-    ? out.risk_level
-    : base.risk_level;
   out.confidence = Number.isFinite(Number(out.confidence))
     ? Number(out.confidence)
     : base.confidence;
   out.uncertainty_note = typeof out.uncertainty_note === "string" ? out.uncertainty_note : "";
   out.headline = typeof out.headline === "string" ? out.headline : "";
-  out.summary = typeof out.summary === "string" ? out.summary : "";
+  out.risk_level = ["low", "medium", "high"].includes(out.risk_level)
+    ? out.risk_level
+    : base.risk_level;
+  if (!out.ok) {
+    out.risk_level = "unknown";
+  }
 
   out.stool_features = {
     bristol_type:
@@ -247,45 +311,110 @@ function normalizeResult(parsed: any) {
       : [],
   };
 
-  out.reasoning_bullets = Array.isArray(out.reasoning_bullets)
-    ? out.reasoning_bullets.map(String).slice(0, 5)
-    : [];
+  out.reasoning_bullets = ensureMinItems(
+    Array.isArray(out.reasoning_bullets) ? out.reasoning_bullets.map(String) : [],
+    5,
+    DEFAULT_REASONING
+  );
 
   out.actions_today = {
-    diet: Array.isArray(actions.diet) ? actions.diet.map(String) : [],
-    hydration: Array.isArray(actions.hydration) ? actions.hydration.map(String) : [],
-    care: Array.isArray(actions.care) ? actions.care.map(String) : [],
-    avoid: Array.isArray(actions.avoid) ? actions.avoid.map(String) : [],
+    diet: ensureMinItems(
+      Array.isArray(actions.diet) ? actions.diet.map(String) : [],
+      2,
+      DEFAULT_DIET
+    ),
+    hydration: ensureMinItems(
+      Array.isArray(actions.hydration) ? actions.hydration.map(String) : [],
+      2,
+      DEFAULT_HYDRATION
+    ),
+    care: ensureMinItems(
+      Array.isArray(actions.care) ? actions.care.map(String) : [],
+      2,
+      DEFAULT_CARE
+    ),
+    avoid: ensureMinItems(
+      Array.isArray(actions.avoid) ? actions.avoid.map(String) : [],
+      2,
+      DEFAULT_AVOID
+    ),
   };
 
-  out.red_flags = Array.isArray(out.red_flags)
-    ? out.red_flags.map((item: any) => {
-        if (typeof item === "string") {
-          return { title: item, detail: "" };
-        }
+  out.red_flags = ensureMinRedFlags(
+    Array.isArray(out.red_flags)
+      ? out.red_flags.map((item: any) => {
+          if (typeof item === "string") {
+            return { title: item, detail: "" };
+          }
+          return {
+            title: item?.title ? String(item.title) : "",
+            detail: item?.detail ? String(item.detail) : item?.why ? String(item.why) : "",
+          };
+        })
+      : [],
+    5
+  );
+
+  out.follow_up_questions = ensureMinItems(
+    Array.isArray(out.follow_up_questions) ? out.follow_up_questions.map(String) : [],
+    6,
+    DEFAULT_FOLLOW_UPS
+  );
+
+  const normalizedSections = Array.isArray(ui.sections)
+    ? ui.sections.map((sec: any) => {
+        const items = Array.isArray(sec?.items)
+          ? sec.items
+          : Array.isArray(sec?.bullets)
+              ? sec.bullets
+              : [];
         return {
-          title: item?.title ? String(item.title) : "",
-          detail: item?.detail ? String(item.detail) : "",
+          title: sec?.title ? String(sec.title) : "",
+          icon_key: sec?.icon_key ? String(sec.icon_key) : "",
+          items: Array.isArray(items) ? items.map(String) : [],
         };
       })
-    : [];
-
-  out.follow_up_questions = Array.isArray(out.follow_up_questions)
-    ? out.follow_up_questions.map(String)
     : [];
 
   out.ui_strings = {
     summary: typeof ui.summary === "string" ? ui.summary : out.summary,
     tags: Array.isArray(ui.tags) ? ui.tags.map(String) : [],
-    sections: Array.isArray(ui.sections)
-      ? ui.sections.map((sec: any) => ({
-          title: sec?.title ? String(sec.title) : "",
-          items: Array.isArray(sec?.items) ? sec.items.map(String) : [],
-        }))
-      : base.ui_strings.sections,
+    sections: normalizedSections,
   };
 
-  out.summary = out.ui_strings.summary || out.summary || "";
+  const baseSections = base.ui_strings.sections;
+  const sections = ensureMinItems(
+    out.ui_strings.sections,
+    4,
+    baseSections
+  ).map((sec: any, idx: number) => ({
+    title: sec.title || baseSections[idx % baseSections.length].title,
+    icon_key: sec.icon_key || baseSections[idx % baseSections.length].icon_key,
+    items: ensureMinItems(
+      Array.isArray(sec.items) ? sec.items.map(String) : [],
+      3,
+      [
+        ...out.actions_today.diet,
+        ...out.actions_today.hydration,
+        ...out.actions_today.care,
+        ...out.actions_today.avoid,
+      ]
+    ),
+  }));
+
+  out.ui_strings.sections = sections;
+
+  if (!out.headline) {
+    out.headline = out.ok ? "整体风险偏低，建议继续观察" : "分析不确定，建议补充信息";
+  }
+  if (!out.uncertainty_note && !out.ok) {
+    out.uncertainty_note = "图片信息不足，建议补充说明或更清晰图片。";
+  }
+
+  out.summary =
+    out.ui_strings.summary ||
+    [out.headline, ...out.reasoning_bullets.slice(0, 2)].filter(Boolean).join("，");
+
   out.bristol_type = out.stool_features.bristol_type ?? null;
   out.color = out.stool_features.color ?? null;
   out.texture = out.stool_features.texture ?? null;
@@ -330,7 +459,7 @@ function upgradeLegacyResult(input: any) {
       sections: [],
     };
   }
-  return normalizeResult(out);
+  return out;
 }
 
 export default {
@@ -340,34 +469,61 @@ export default {
     console.log("[WORKER] request", request.method, url.pathname);
     const origin = request.headers.get("Origin") || undefined;
 
-    const json = (data: unknown, status = 200) =>
-      new Response(JSON.stringify(data), {
+    const workerVersion = env.WORKER_VERSION ?? "dev";
+    const json = (data: unknown, status = 200, extraHeaders: Record<string, string> = {}) => {
+      let payload: unknown = data;
+      if (data && typeof data === "object") {
+        const obj = data as Record<string, unknown>;
+        if (!("schema_version" in obj)) {
+          obj.schema_version = SCHEMA_VERSION;
+        }
+        payload = obj;
+      }
+      return new Response(JSON.stringify(payload), {
         status,
-        headers: { "content-type": "application/json", ...corsHeaders(origin) },
+        headers: {
+          "content-type": "application/json",
+          "x-worker-version": workerVersion,
+          "schema_version": String(SCHEMA_VERSION),
+          ...extraHeaders,
+          ...corsHeaders(origin),
+        },
       });
+    };
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
     if (url.pathname === "/ping" && request.method === "GET") {
-      return json({ ok: true });
+      return json({ ok: true, schema_version: SCHEMA_VERSION, worker_version: workerVersion });
+    }
+
+    if (url.pathname === "/version" && request.method === "GET") {
+      return json({
+        ok: true,
+        version: workerVersion,
+        worker_version: workerVersion,
+        schema_version: SCHEMA_VERSION,
+      });
     }
 
     if (url.pathname === "/analyze" && request.method === "POST") {
       const rayId = request.headers.get("cf-ray");
+      const proxyHeader = { "x-proxy-version": "unknown" };
       try {
         const ct = request.headers.get("content-type") || "";
         console.log("[ANALYZE] content-type=" + ct);
         if (!ct.includes("application/json")) {
-          return json(
+          const normalized = normalizeV2(
             {
               ok: false,
               error: "BAD_CONTENT_TYPE",
               message: "Content-Type must be application/json",
             },
-            400
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
 
         const raw = await request.text();
@@ -389,10 +545,11 @@ export default {
         const image = typeof body.image === "string" ? body.image : "";
         if (!image || image.trim().length < 10) {
           console.log("[ANALYZE] missing image keys", Object.keys(body));
-          return json(
+          const normalized = normalizeV2(
             { ok: false, error: "NO_IMAGE", message: "image is required", rayId },
-            400
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
 
         const proxyUrl = env.OPENAI_PROXY_URL;
@@ -406,6 +563,11 @@ export default {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
+          const proxyVersion =
+            proxyResp.headers.get("x-proxy-version") ||
+            proxyResp.headers.get("x-proxy-version".toLowerCase()) ||
+            "unknown";
+          const proxyHeaders = { "x-proxy-version": proxyVersion };
           const ms = Date.now() - start;
           console.log("[OPENAI] done");
           console.log("[OPENAI] ms=" + ms);
@@ -416,21 +578,30 @@ export default {
           } catch {
             data = { ok: false, error: "BAD_PROXY_RESPONSE", message: text };
           }
+          if (!proxyResp.ok && (data as any)?.ok !== true) {
+            data = {
+              ok: false,
+              error: "PROXY_ERROR",
+              message: text || `proxy status ${proxyResp.status}`,
+            };
+          }
           if ((data as any)?.ok === true) {
             data = upgradeLegacyResult(data);
           }
-          return json(data, proxyResp.status);
+          const normalized = normalizeV2(data, workerVersion, proxyVersion);
+          return json(normalized, 200, proxyHeaders);
         }
 
         if (!env.OPENAI_API_KEY) {
-          return json(
+          const normalized = normalizeV2(
             {
               ok: false,
               error: "OPENAI_UNSUPPORTED_REGION",
               message: "OpenAI 不支持当前 Worker 出网地区，请配置 OPENAI_PROXY_URL",
             },
-            503
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
 
         console.log("[OPENAI] start");
@@ -467,52 +638,48 @@ export default {
 
         if (!resp.ok) {
           const text = await resp.text().catch(() => "");
-          return json(
+          const normalized = normalizeV2(
             {
               ok: false,
               error: "OPENAI_ERROR",
               message: text || "openai request failed",
               rayId,
             },
-            500
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
 
         const data = await resp.json();
         const outputText = extractOutputText(data);
         if (!outputText) {
-          return json(
+          const normalized = normalizeV2(
             { ok: false, error: "OPENAI_ERROR", message: "empty model output", rayId },
-            500
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
         let parsed: any = {};
         try {
           parsed = JSON.parse(outputText);
         } catch {
-          return json(
+          const normalized = normalizeV2(
             { ok: false, error: "OPENAI_ERROR", message: "invalid json output", rayId },
-            500
+            workerVersion
           );
+          return json(normalized, 200, proxyHeader);
         }
-        const normalized = normalizeResult(parsed);
-        return json(normalized, 200);
+        const normalized = normalizeV2(parsed, workerVersion);
+        return json(normalized, 200, proxyHeader);
       } catch (error: any) {
         console.log("[OPENAI] catch");
         console.error("[OPENAI] error", error);
         console.error("[OPENAI] stack", error?.stack ?? "no stack");
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            error: "OPENAI_ERROR",
-            message: "analyze failed",
-            rayId,
-          }),
-          {
-            status: 500,
-            headers: { "content-type": "application/json" },
-          }
+        const normalized = normalizeV2(
+          { ok: false, error: "OPENAI_ERROR", message: "analyze failed", rayId },
+          workerVersion
         );
+        return json(normalized, 200, proxyHeader);
       }
     }
 
