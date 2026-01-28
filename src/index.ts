@@ -259,10 +259,15 @@ function normalizeResult(parsed: any) {
   };
 
   out.red_flags = Array.isArray(out.red_flags)
-    ? out.red_flags.map((item: any) => ({
-        title: item?.title ? String(item.title) : "",
-        detail: item?.detail ? String(item.detail) : "",
-      }))
+    ? out.red_flags.map((item: any) => {
+        if (typeof item === "string") {
+          return { title: item, detail: "" };
+        }
+        return {
+          title: item?.title ? String(item.title) : "",
+          detail: item?.detail ? String(item.detail) : "",
+        };
+      })
     : [];
 
   out.follow_up_questions = Array.isArray(out.follow_up_questions)
@@ -288,6 +293,44 @@ function normalizeResult(parsed: any) {
   out.diet_advice = out.actions_today.diet || [];
 
   return out;
+}
+
+function upgradeLegacyResult(input: any) {
+  const out = { ...(input || {}) };
+  out.ok = out.ok === false ? false : true;
+  out.headline = out.headline ?? out.summary ?? "";
+  out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : 50;
+  out.risk_level = out.risk_level ?? "low";
+  out.confidence = Number.isFinite(Number(out.confidence)) ? Number(out.confidence) : 0.6;
+  out.uncertainty_note = out.uncertainty_note ?? "";
+  if (!out.stool_features) {
+    out.stool_features = {
+      bristol_type: out.bristol_type ?? null,
+      color: out.color ?? null,
+      texture: out.texture ?? null,
+      volume: "unknown",
+      visible_findings: ["none"],
+    };
+  }
+  if (!out.reasoning_bullets) out.reasoning_bullets = [];
+  if (!out.actions_today) {
+    out.actions_today = {
+      diet: Array.isArray(out.diet_advice) ? out.diet_advice : [],
+      hydration: out.hydration_hint ? [out.hydration_hint] : [],
+      care: Array.isArray(out.care_advice) ? out.care_advice : [],
+      avoid: [],
+    };
+  }
+  if (!out.red_flags) out.red_flags = [];
+  if (!out.follow_up_questions) out.follow_up_questions = [];
+  if (!out.ui_strings) {
+    out.ui_strings = {
+      summary: out.summary ?? "",
+      tags: [],
+      sections: [],
+    };
+  }
+  return normalizeResult(out);
 }
 
 export default {
@@ -372,6 +415,9 @@ export default {
             data = JSON.parse(text);
           } catch {
             data = { ok: false, error: "BAD_PROXY_RESPONSE", message: text };
+          }
+          if ((data as any)?.ok === true) {
+            data = upgradeLegacyResult(data);
           }
           return json(data, proxyResp.status);
         }
