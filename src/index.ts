@@ -111,13 +111,13 @@ function userPromptFromBody(body: Record<string, unknown>) {
   const odor = body?.odor ?? "unknown";
   const strain = body?.pain_or_strain;
   const diet = body?.diet_keywords ?? "";
-  const context = body?.context_input;
+  const context = (body as any)?.context ?? (body as any)?.context_input;
   return `
 幼儿月龄: ${age ?? "unknown"}
 气味: ${odor}
 是否疼痛/费力: ${typeof strain === "boolean" ? String(strain) : "unknown"}
 最近饮食关键词: ${diet || "unknown"}
-补充信息(context_input): ${context ? JSON.stringify(context) : "none"}
+补充信息(context): ${context ? JSON.stringify(context) : "none"}
 
 请基于图片和以上信息给出分析与建议。
 `.trim();
@@ -131,15 +131,19 @@ const SYSTEM_PROMPT = `
 1. 必须先输出“一句话结论（先说重点）”（写进 headline / ui_strings.longform.conclusion），明确：是否像腹泻/是否像感染/更像什么。
 2. “具体怎么看这个便便”必须分为：形态/颜色/质地细节，并且每部分都要写“为什么会这样”（写进 interpretation.why_*，每项>=2）。
 3. 必须输出“结合你填写的情况（很关键）”，并引用 context_input（若提供：recent_foods、recent_drinks、精神、次数、发热、腹痛等），写入 interpretation.how_context_affects（>=3）。
-4. “可能原因”必须按常见程度排序（写入 reasoning_bullets，>=5，且每条是因果链）。
+4. “可能原因”必须按常见程度排序（写入 possible_causes 与 reasoning_bullets，possible_causes>=3，reasoning_bullets>=5）。
 5. “现在需要做什么”必须可执行，分 ✅可以做 / ❌少一点 / 👀观察指标（分别落在 actions_today.*）。
 6. “什么时候需要警惕”必须给明确红旗（red_flags >=5，object 结构 {title, detail}）。
 7. 最后输出“家长安心指标”一句话总结（写入 ui_strings.longform.reassure）。
 8. 语言风格：像儿科医生对家长说话，清晰克制、不吓人；禁止空话；禁止只输出泛泛建议。
-9. 必须填满 required 数组长度下限，任何数组不允许为空。
+9. 必须填满 required 数组长度下限，任何数组不允许为空，避免使用 "unknown" 作为主结论文本。
 10. 若图片无法判断，必须明确写出“缺什么信息/建议怎么拍/建议补充什么”，并仍返回完整 v2 结构（ok=false，但字段齐全）。
 
-必须输出 JSON 并严格匹配 schema_version=2 的结构。
+必须输出 JSON 并严格匹配 schema_version=2 的结构，包含：
+- ok, schema_version=2, is_stool_image=true, headline, score, risk_level, confidence, uncertainty_note
+- stool_features: shape, shape_desc, color, color_desc, color_reason, texture, texture_desc, abnormal_signs, bristol_type, bristol_range, volume, wateriness, mucus, foam, blood, undigested_food, separation_layers, odor_level, visible_findings
+- doctor_explanation: one_sentence_conclusion, visual_analysis{shape,color,texture}, combined_judgement
+- possible_causes: [{title, explanation}]
 只输出 JSON，不要 Markdown。
 `.trim();
 
@@ -147,6 +151,7 @@ function buildDefaultResult() {
   return {
     ok: true,
     schema_version: SCHEMA_VERSION,
+    is_stool_image: true,
     worker_version: "",
     proxy_version: "unknown",
     model_used: "unknown",
@@ -158,9 +163,14 @@ function buildDefaultResult() {
     stool_features: {
       bristol_type: null,
       bristol_range: "unknown",
+      shape: "偏软/糊状",
       shape_desc: "unknown",
+      color: "黄褐/偏黄",
       color_desc: "unknown",
+      color_reason: "多与饮食构成和肠道通过速度相关",
+      texture: "细腻/糊状",
       texture_desc: "unknown",
+      abnormal_signs: ["未见明显异常"],
       volume: "unknown",
       wateriness: "none",
       mucus: "none",
@@ -171,6 +181,15 @@ function buildDefaultResult() {
       odor_level: "unknown",
       visible_findings: ["none"],
     },
+    doctor_explanation: {
+      one_sentence_conclusion: "",
+      shape: "",
+      color: "",
+      texture: "",
+      visual_analysis: { shape: "", color: "", texture: "" },
+      combined_judgement: "",
+    },
+    possible_causes: [],
     interpretation: {
       overall_judgement: "需要结合更多信息判断",
       why_shape: ["图片角度与光线影响形态判断", "仅凭单张图片可能低估真实形态"],
@@ -214,6 +233,7 @@ function buildDefaultResult() {
     texture: null,
     hydration_hint: "",
     diet_advice: [],
+    explanation: "",
   };
 }
 
@@ -432,12 +452,15 @@ function normalizeV2(
   const out = { ...base, ...(parsed || {}) } as any;
 
   const stool = { ...base.stool_features, ...(out.stool_features || {}) };
+  const doctor = { ...base.doctor_explanation, ...(out.doctor_explanation || {}) };
+  const causes = Array.isArray(out.possible_causes) ? out.possible_causes : [];
   const interpretation = { ...base.interpretation, ...(out.interpretation || {}) };
   const actions = { ...base.actions_today, ...(out.actions_today || {}) };
   const ui = { ...base.ui_strings, ...(out.ui_strings || {}) };
   const longform = { ...base.ui_strings.longform, ...(ui.longform || {}) };
 
   out.ok = out.ok === false ? false : true;
+  out.is_stool_image = out.is_stool_image === false ? false : true;
   out.schema_version = SCHEMA_VERSION;
   out.worker_version = out.worker_version || workerVersion;
   out.proxy_version = proxyVersion || out.proxy_version || "unknown";
@@ -450,14 +473,24 @@ function normalizeV2(
     : base.confidence;
   out.uncertainty_note = typeof out.uncertainty_note === "string" ? out.uncertainty_note : "";
   out.headline = typeof out.headline === "string" ? out.headline : "";
+  out.explanation = typeof out.explanation === "string" ? out.explanation : "";
   out.risk_level = ["low", "medium", "high", "unknown"].includes(out.risk_level)
     ? out.risk_level
     : base.risk_level;
   if (!out.ok) {
     out.risk_level = "unknown";
   }
+  if (out.is_stool_image === false) {
+    out.risk_level = "unknown";
+  }
 
-  out.stool_features = {
+  out.stool_features = out.is_stool_image === false
+    ? null
+    : {
+    shape:
+      typeof stool.shape === "string" && stool.shape.trim()
+        ? stool.shape.trim()
+        : base.stool_features.shape,
     bristol_type:
       stool.bristol_type === null
         ? null
@@ -472,14 +505,29 @@ function normalizeV2(
       typeof stool.shape_desc === "string" && stool.shape_desc.trim()
         ? stool.shape_desc.trim()
         : base.stool_features.shape_desc,
+    color:
+      typeof stool.color === "string" && stool.color.trim()
+        ? stool.color.trim()
+        : base.stool_features.color,
     color_desc:
       typeof stool.color_desc === "string" && stool.color_desc.trim()
         ? stool.color_desc.trim()
         : base.stool_features.color_desc,
+    color_reason:
+      typeof stool.color_reason === "string" && stool.color_reason.trim()
+        ? stool.color_reason.trim()
+        : base.stool_features.color_reason,
+    texture:
+      typeof stool.texture === "string" && stool.texture.trim()
+        ? stool.texture.trim()
+        : base.stool_features.texture,
     texture_desc:
       typeof stool.texture_desc === "string" && stool.texture_desc.trim()
         ? stool.texture_desc.trim()
         : base.stool_features.texture_desc,
+    abnormal_signs: Array.isArray(stool.abnormal_signs)
+      ? stool.abnormal_signs.map(String)
+      : [],
     volume: ["small", "medium", "large", "unknown"].includes(stool.volume)
       ? stool.volume
       : "unknown",
@@ -502,10 +550,91 @@ function normalizeV2(
       ? stool.visible_findings.map(String)
       : [],
   };
-  out.stool_features.visible_findings = ensureMinItems(
-    out.stool_features.visible_findings,
+  if (out.stool_features) {
+    out.stool_features.visible_findings = ensureMinItems(
+      out.stool_features.visible_findings,
+      1,
+      ["none"]
+    );
+    out.stool_features.abnormal_signs = ensureMinItems(
+      out.stool_features.abnormal_signs,
+      1,
+      ["未见明显异常"]
+    );
+  }
+  out.stool_features.abnormal_signs = ensureMinItems(
+    out.stool_features.abnormal_signs,
     1,
-    ["none"]
+    ["未见明显异常"]
+  );
+
+  out.doctor_explanation = out.is_stool_image === false
+    ? null
+    : {
+        one_sentence_conclusion:
+          typeof doctor.one_sentence_conclusion === "string" && doctor.one_sentence_conclusion.trim()
+            ? doctor.one_sentence_conclusion.trim()
+            : out.headline || base.doctor_explanation.one_sentence_conclusion,
+        shape:
+          typeof doctor.shape === "string" && doctor.shape.trim()
+            ? doctor.shape.trim()
+            : "",
+        color:
+          typeof doctor.color === "string" && doctor.color.trim()
+            ? doctor.color.trim()
+            : "",
+        texture:
+          typeof doctor.texture === "string" && doctor.texture.trim()
+            ? doctor.texture.trim()
+            : "",
+        visual_analysis: {
+          shape:
+            typeof doctor.visual_analysis?.shape === "string" && doctor.visual_analysis.shape.trim()
+              ? doctor.visual_analysis.shape.trim()
+              : "",
+          color:
+            typeof doctor.visual_analysis?.color === "string" && doctor.visual_analysis.color.trim()
+              ? doctor.visual_analysis.color.trim()
+              : "",
+          texture:
+            typeof doctor.visual_analysis?.texture === "string" && doctor.visual_analysis.texture.trim()
+              ? doctor.visual_analysis.texture.trim()
+              : "",
+        },
+        combined_judgement:
+          typeof doctor.combined_judgement === "string" && doctor.combined_judgement.trim()
+            ? doctor.combined_judgement.trim()
+            : interpretation.overall_judgement || base.interpretation.overall_judgement,
+      };
+
+  if (out.doctor_explanation) {
+    if (!out.doctor_explanation.shape && out.doctor_explanation.visual_analysis?.shape) {
+      out.doctor_explanation.shape = out.doctor_explanation.visual_analysis.shape;
+    }
+    if (!out.doctor_explanation.color && out.doctor_explanation.visual_analysis?.color) {
+      out.doctor_explanation.color = out.doctor_explanation.visual_analysis.color;
+    }
+    if (!out.doctor_explanation.texture && out.doctor_explanation.visual_analysis?.texture) {
+      out.doctor_explanation.texture = out.doctor_explanation.visual_analysis.texture;
+    }
+  }
+
+  out.possible_causes = ensureMinItems(
+    causes.map((item: any) => {
+      if (!item || typeof item !== "object") {
+        return { title: "饮食结构影响", explanation: "近期饮食变化会让便便更偏软。" };
+      }
+      return {
+        title: item.title ? String(item.title) : "常见原因",
+        explanation: item.explanation ? String(item.explanation) : "常见原因导致的短期变化。",
+      };
+    }),
+    3,
+    [
+      { title: "饮食结构影响", explanation: "水果或含水量高的食物增加会让便便偏软。" },
+      { title: "肠道蠕动偏快", explanation: "幼儿阶段肠道功能调试期，容易偏软。" },
+      { title: "轻微受凉或作息变化", explanation: "环境变化可短暂影响消化节律。" },
+    ]
   );
 
   out.interpretation = {
@@ -724,7 +853,9 @@ function normalizeV2(
     conclusion: out.ui_strings.longform.conclusion || out.headline || "整体情况需要继续观察。",
     how_to_read:
       out.ui_strings.longform.how_to_read ||
-      `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`,
+      out.stool_features
+        ? `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`
+        : "图片无法识别为大便，建议重新拍摄。",
     context:
       out.ui_strings.longform.context ||
       out.interpretation.how_context_affects.join("；"),
@@ -741,9 +872,9 @@ function normalizeV2(
       "若精神和食欲良好、尿量正常，通常可先在家观察并记录变化。",
   };
 
-  out.bristol_type = out.stool_features.bristol_type ?? null;
-  out.color = out.stool_features.color_desc ?? null;
-  out.texture = out.stool_features.texture_desc ?? null;
+  out.bristol_type = out.stool_features?.bristol_type ?? null;
+  out.color = out.stool_features?.color_desc ?? null;
+  out.texture = out.stool_features?.texture_desc ?? null;
   out.hydration_hint = out.actions_today.hydration[0] || "";
   out.diet_advice = out.actions_today.diet || [];
 
@@ -761,10 +892,15 @@ function upgradeLegacyResult(input: any) {
   if (!out.stool_features) {
     out.stool_features = {
       bristol_type: out.bristol_type ?? null,
+      shape: "偏软/糊状",
       bristol_range: "unknown",
       shape_desc: "未知形态",
+      color: out.color ?? "黄褐/偏黄",
       color_desc: out.color ?? "未知颜色",
+      color_reason: "多与饮食构成和肠道通过速度相关",
+      texture: out.texture ?? "细腻/糊状",
       texture_desc: out.texture ?? "未知质地",
+      abnormal_signs: ["未见明显异常"],
       volume: "unknown",
       wateriness: "none",
       mucus: "none",
@@ -785,6 +921,27 @@ function upgradeLegacyResult(input: any) {
       how_context_affects: ["未提供补充信息", "若精神食欲良好更偏功能性", "若有发热腹痛需警惕"],
       confidence_explain: "缺少完整补充信息，置信度有限。",
     };
+  }
+  if (!out.doctor_explanation) {
+    out.doctor_explanation = {
+      one_sentence_conclusion: out.headline ?? "",
+      shape: "形态偏软并不一定异常",
+      color: "颜色多与饮食和通过速度相关",
+      texture: "未见感染性腹泻的典型表现",
+      visual_analysis: {
+        shape: "形态偏软并不一定异常",
+        color: "颜色多与饮食和通过速度相关",
+        texture: "未见感染性腹泻的典型表现",
+      },
+      combined_judgement: out.interpretation?.overall_judgement || "",
+    };
+  }
+  if (!out.possible_causes) {
+    out.possible_causes = [
+      { title: "饮食结构影响", explanation: "水果或含水量高的食物增加会让便便偏软。" },
+      { title: "肠道蠕动偏快", explanation: "幼儿阶段肠道功能调试期，容易偏软。" },
+      { title: "轻微受凉或作息变化", explanation: "环境变化可短暂影响消化节律。" },
+    ];
   }
   if (!out.reasoning_bullets) out.reasoning_bullets = [];
   if (!out.actions_today) {
@@ -890,7 +1047,10 @@ export default {
 
         console.log("[ANALYZE] body keys", Object.keys(body));
         const contextInput =
-          body && typeof body.context_input === "object" ? (body.context_input as Record<string, unknown>) : null;
+          body &&
+          (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
+            ? (((body as any).context || (body as any).context_input) as Record<string, unknown>)
+            : null;
         console.log(
           "[ANALYZE] context_input keys",
           contextInput ? Object.keys(contextInput) : []
@@ -1001,6 +1161,14 @@ export default {
             proxyVersion,
             modelUsed
           );
+          if (normalized && typeof normalized === "object") {
+            const guardFlag = (normalized as any).is_stool_image;
+            if (guardFlag === false) {
+              console.log(
+                `[GUARD] is_stool_image=false confidence=${(normalized as any).confidence ?? ""} reason=${(normalized as any).explanation ?? ""}`
+              );
+            }
+          }
           return json(normalized, 200, proxyHeaders);
         }
 
