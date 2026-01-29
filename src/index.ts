@@ -243,6 +243,113 @@ const DEFAULT_FOLLOW_UPS = [
   "最近饮食是否有明显变化？",
 ];
 
+function buildInvalidImageResult(workerVersion: string, rayId?: string) {
+  return {
+    ok: false,
+    error_code: "INVALID_IMAGE",
+    error: "INVALID_IMAGE",
+    message: "image is missing or invalid",
+    schema_version: SCHEMA_VERSION,
+    worker_version: workerVersion,
+    proxy_version: "unknown",
+    model_used: "unknown",
+    headline: "图片信息不足，无法分析",
+    score: 0,
+    risk_level: "unknown",
+    confidence: 0,
+    uncertainty_note: "请提供清晰、光线充足的图片，并保证目标占画面主要区域。",
+    stool_features: {
+      bristol_type: null,
+      color: null,
+      texture: null,
+      volume: "unknown",
+      visible_findings: [],
+    },
+    reasoning_bullets: [],
+    actions_today: { diet: [], hydration: [], care: [], avoid: [] },
+    red_flags: [],
+    follow_up_questions: [],
+    ui_strings: {
+      summary: "",
+      tags: [],
+      sections: [
+        {
+          title: "如何拍/如何裁剪",
+          icon_key: "camera",
+          items: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+        },
+        {
+          title: "建议补充信息",
+          icon_key: "question",
+          items: ["气味/是否疼痛", "排便次数", "是否便血/黑便"],
+        },
+      ],
+    },
+    summary: "",
+    bristol_type: null,
+    color: null,
+    texture: null,
+    hydration_hint: "",
+    diet_advice: [],
+    rayId,
+  };
+}
+
+function decodeBase64Image(input: string): Uint8Array | null {
+  const s = input.trim();
+  const b64 = s.startsWith("data:image/")
+    ? s.slice(s.indexOf("base64,") + 7)
+    : s;
+  try {
+    const binary = atob(b64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function getImageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  // PNG
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    const width =
+      (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+    const height =
+      (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+    return { width, height };
+  }
+
+  // JPEG
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) {
+        i += 1;
+        continue;
+      }
+      const marker = bytes[i + 1];
+      const size = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (marker === 0xc0 || marker === 0xc2) {
+        const height = (bytes[i + 5] << 8) | bytes[i + 6];
+        const width = (bytes[i + 7] << 8) | bytes[i + 8];
+        return { width, height };
+      }
+      i += 2 + size;
+    }
+  }
+  return null;
+}
+
 function ensureMinItems<T>(list: T[], min: number, defaults: T[]) {
   const out = Array.isArray(list) ? list.slice() : [];
   let i = 0;
@@ -266,7 +373,12 @@ function ensureMinRedFlags(
   return out;
 }
 
-function normalizeV2(parsed: any, workerVersion: string, proxyVersion?: string) {
+function normalizeV2(
+  parsed: any,
+  workerVersion: string,
+  proxyVersion?: string,
+  modelUsed?: string
+) {
   const base = buildDefaultResult();
   const out = { ...base, ...(parsed || {}) } as any;
 
@@ -280,6 +392,8 @@ function normalizeV2(parsed: any, workerVersion: string, proxyVersion?: string) 
   if (proxyVersion) {
     out.proxy_version = proxyVersion;
   }
+  out.proxy_version = out.proxy_version || "unknown";
+  out.model_used = modelUsed || out.model_used || "unknown";
 
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
   out.confidence = Number.isFinite(Number(out.confidence))
@@ -402,7 +516,44 @@ function normalizeV2(parsed: any, workerVersion: string, proxyVersion?: string) 
     ),
   }));
 
-  out.ui_strings.sections = sections;
+  const dupSections = sections.every((sec) => {
+    const key = JSON.stringify(sec.items || []);
+    return sections.every((s) => JSON.stringify(s.items || []) === key);
+  });
+
+  out.ui_strings.sections = dupSections
+    ? [
+        {
+          title: "饮食",
+          icon_key: "diet",
+          items: ensureMinItems(out.actions_today.diet, 2, ["清淡饮食", "少量多餐"]),
+        },
+        {
+          title: "补液",
+          icon_key: "hydration",
+          items: ensureMinItems(out.actions_today.hydration, 2, ["少量多次补液", "观察尿量"]),
+        },
+        {
+          title: "护理",
+          icon_key: "care",
+          items: ensureMinItems(out.actions_today.care, 2, ["便后清洁", "保持干爽"]),
+        },
+        {
+          title: "警戒信号",
+          icon_key: "warning",
+          items: ensureMinItems(
+            out.red_flags.map((f: any) => `${f.title} ${f.detail}`.trim()),
+            2,
+            ["出现便血或黑便", "持续高热或明显不适"]
+          ),
+        },
+        {
+          title: "追问问题",
+          icon_key: "question",
+          items: ensureMinItems(out.follow_up_questions, 2, ["是否发热？", "24小时内排便次数多少？"]),
+        },
+      ]
+    : sections;
 
   if (!out.headline) {
     out.headline = out.ok ? "整体风险偏低，建议继续观察" : "分析不确定，建议补充信息";
@@ -510,20 +661,16 @@ export default {
 
     if (url.pathname === "/analyze" && request.method === "POST") {
       const rayId = request.headers.get("cf-ray");
-      const proxyHeader = { "x-proxy-version": "unknown" };
+      const baseHeaders = {
+        "x-proxy-version": "unknown",
+        "x-openai-model": "unknown",
+      };
       try {
         const ct = request.headers.get("content-type") || "";
         console.log("[ANALYZE] content-type=" + ct);
         if (!ct.includes("application/json")) {
-          const normalized = normalizeV2(
-            {
-              ok: false,
-              error: "BAD_CONTENT_TYPE",
-              message: "Content-Type must be application/json",
-            },
-            workerVersion
-          );
-          return json(normalized, 200, proxyHeader);
+          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          return json(invalid, 422, baseHeaders);
         }
 
         const raw = await request.text();
@@ -543,13 +690,17 @@ export default {
           typeof body.image === "string" ? body.image.length : null
         );
         const image = typeof body.image === "string" ? body.image : "";
-        if (!image || image.trim().length < 10) {
+        if (!image || image.trim().length < 10 || image.trim() === "test") {
           console.log("[ANALYZE] missing image keys", Object.keys(body));
-          const normalized = normalizeV2(
-            { ok: false, error: "NO_IMAGE", message: "image is required", rayId },
-            workerVersion
-          );
-          return json(normalized, 200, proxyHeader);
+          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          return json(invalid, 422, baseHeaders);
+        }
+
+        const imageBytes = decodeBase64Image(image);
+        const dims = imageBytes ? getImageDimensions(imageBytes) : null;
+        if (!imageBytes || !dims || dims.width < 512 || dims.height < 512) {
+          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          return json(invalid, 422, baseHeaders);
         }
 
         const proxyUrl = env.OPENAI_PROXY_URL;
@@ -567,7 +718,14 @@ export default {
             proxyResp.headers.get("x-proxy-version") ||
             proxyResp.headers.get("x-proxy-version".toLowerCase()) ||
             "unknown";
-          const proxyHeaders = { "x-proxy-version": proxyVersion };
+      const proxyModel =
+        proxyResp.headers.get("x-openai-model") ||
+        proxyResp.headers.get("x-openai-model".toLowerCase()) ||
+        "";
+      const proxyHeaders = {
+        "x-proxy-version": proxyVersion,
+        "x-openai-model": proxyModel || "unknown",
+      };
           const ms = Date.now() - start;
           console.log("[OPENAI] done");
           console.log("[OPENAI] ms=" + ms);
@@ -588,7 +746,16 @@ export default {
           if ((data as any)?.ok === true) {
             data = upgradeLegacyResult(data);
           }
-          const normalized = normalizeV2(data, workerVersion, proxyVersion);
+          const modelUsed =
+            (data as any)?.model_used ||
+            proxyModel ||
+            "unknown";
+          const normalized = normalizeV2(
+            data,
+            workerVersion,
+            proxyVersion,
+            modelUsed
+          );
           return json(normalized, 200, proxyHeaders);
         }
 
@@ -601,11 +768,12 @@ export default {
             },
             workerVersion
           );
-          return json(normalized, 200, proxyHeader);
+          return json(normalized, 200, baseHeaders);
         }
 
         console.log("[OPENAI] start");
         const start = Date.now();
+        const directModel = "gpt-5.2";
         const resp = await fetch("https://api.openai.com/v1/responses", {
           method: "POST",
           headers: {
@@ -613,7 +781,7 @@ export default {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "gpt-4.1-mini",
+            model: directModel,
             input: [
               {
                 role: "system",
@@ -645,9 +813,11 @@ export default {
               message: text || "openai request failed",
               rayId,
             },
-            workerVersion
+            workerVersion,
+            undefined,
+            directModel
           );
-          return json(normalized, 200, proxyHeader);
+          return json(normalized, 200, baseHeaders);
         }
 
         const data = await resp.json();
@@ -655,9 +825,11 @@ export default {
         if (!outputText) {
           const normalized = normalizeV2(
             { ok: false, error: "OPENAI_ERROR", message: "empty model output", rayId },
-            workerVersion
+            workerVersion,
+            undefined,
+            directModel
           );
-          return json(normalized, 200, proxyHeader);
+          return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let parsed: any = {};
         try {
@@ -665,21 +837,25 @@ export default {
         } catch {
           const normalized = normalizeV2(
             { ok: false, error: "OPENAI_ERROR", message: "invalid json output", rayId },
-            workerVersion
+            workerVersion,
+            undefined,
+            directModel
           );
-          return json(normalized, 200, proxyHeader);
+          return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
-        const normalized = normalizeV2(parsed, workerVersion);
-        return json(normalized, 200, proxyHeader);
+        const normalized = normalizeV2(parsed, workerVersion, undefined, directModel);
+        return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
       } catch (error: any) {
         console.log("[OPENAI] catch");
         console.error("[OPENAI] error", error);
         console.error("[OPENAI] stack", error?.stack ?? "no stack");
         const normalized = normalizeV2(
           { ok: false, error: "OPENAI_ERROR", message: "analyze failed", rayId },
-          workerVersion
+          workerVersion,
+          undefined,
+          "unknown"
         );
-        return json(normalized, 200, proxyHeader);
+        return json(normalized, 200, baseHeaders);
       }
     }
 
