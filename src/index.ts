@@ -2,6 +2,7 @@ export interface Env {
   OPENAI_API_KEY: string;
   OPENAI_PROXY_URL?: string;
   WORKER_VERSION?: string;
+  VERIFY_TOKEN?: string;
 }
 
 type Locale = "zh" | "en" | "ja" | "ko" | "fr" | "de" | "es" | "id" | "th";
@@ -894,6 +895,17 @@ export default {
           "[ANALYZE] context_input keys",
           contextInput ? Object.keys(contextInput) : []
         );
+        const verifyHeader = request.headers.get("x-verify-token");
+        const verifyEnabled = !!env.VERIFY_TOKEN;
+        const verifyMatched = verifyEnabled && verifyHeader === env.VERIFY_TOKEN;
+        if (verifyEnabled) {
+          console.log(
+            "[ANALYZE] verify token present=" +
+              (verifyHeader ? "yes" : "no") +
+              " matched=" +
+              (verifyMatched ? "yes" : "no")
+          );
+        }
         console.log("[ANALYZE] image type", typeof body.image);
         console.log(
           "[ANALYZE] image length",
@@ -940,6 +952,15 @@ export default {
           console.log("[OPENAI] done");
           console.log("[OPENAI] ms=" + ms);
           const text = await proxyResp.text().catch(() => "");
+          if (!proxyResp.ok) {
+            console.log(
+              `[PROXY] status=${proxyResp.status} content-type=${proxyResp.headers.get("content-type") || ""}`
+            );
+            console.log(
+              `[PROXY] headers x-proxy-version=${proxyVersion} x-openai-model=${proxyModel || "unknown"}`
+            );
+            console.log(`[PROXY] body preview=${text.slice(0, 200)}`);
+          }
           let data: unknown;
           try {
             data = JSON.parse(text);
