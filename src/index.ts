@@ -198,6 +198,14 @@ function buildDefaultResult() {
       how_context_affects: ["未提供补充信息，无法判断饮食与症状关联", "若近期有发热/腹痛需提高警惕", "若精神食欲正常则更偏功能性变化"],
       confidence_explain: "缺少完整补充信息，置信度有限。",
     },
+    context_summary: "",
+    analysis_basis: {
+      image_only: [],
+      combined_reasoning: [],
+    },
+    input_echo: {
+      context: {},
+    },
     reasoning_bullets: [],
     actions_today: {
       diet: [],
@@ -243,6 +251,21 @@ const DEFAULT_REASONING = [
   "当前结果更像短期饮食或消化变化",
   "建议持续记录 24-48 小时变化",
   "如出现不适或异常症状需及时就医",
+];
+
+const DEFAULT_IMAGE_ONLY = [
+  "图片中可见的形态与质地特征",
+  "颜色分布与光照条件下的表现",
+  "是否可见明显异物/血丝/粘液",
+  "整体成形度与水样分离情况",
+];
+
+const DEFAULT_COMBINED_REASONING = [
+  "图片特征与补充信息综合后更偏向功能性变化",
+  "饮食与饮水情况可能影响颜色与质地",
+  "精神状态与症状有助判断是否存在感染迹象",
+  "如无发热/呕吐更支持可观察的短期变化",
+  "若补充信息不足需保留不确定性",
 ];
 
 const DEFAULT_DIET = ["清淡易消化饮食", "少量多餐，观察耐受", "适量软熟蔬果补充"];
@@ -467,6 +490,24 @@ function normalizeV2(
   out.model_used = modelUsed || out.model_used || "unknown";
   out.context_input = out.context_input && typeof out.context_input === "object" ? out.context_input : undefined;
   out.input_context = out.input_context && typeof out.input_context === "object" ? out.input_context : out.context_input;
+  out.context_summary = typeof out.context_summary === "string" ? out.context_summary : "";
+  const basis = { ...base.analysis_basis, ...(out.analysis_basis || {}) } as any;
+  out.analysis_basis = {
+    image_only: ensureMinItems(
+      Array.isArray(basis.image_only) ? basis.image_only.map(String) : [],
+      4,
+      DEFAULT_IMAGE_ONLY
+    ),
+    combined_reasoning: ensureMinItems(
+      Array.isArray(basis.combined_reasoning) ? basis.combined_reasoning.map(String) : [],
+      5,
+      DEFAULT_COMBINED_REASONING
+    ),
+  };
+  const echo = out.input_echo && typeof out.input_echo === "object" ? out.input_echo : base.input_echo;
+  out.input_echo = {
+    context: echo && typeof echo.context === "object" ? echo.context : {},
+  };
 
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
   out.confidence = Number.isFinite(Number(out.confidence))
@@ -1029,11 +1070,13 @@ export default {
         "x-proxy-version": "unknown",
         "x-openai-model": "unknown",
       };
+      let context: Record<string, unknown> = {};
       try {
         const ct = request.headers.get("content-type") || "";
         console.log("[ANALYZE] content-type=" + ct);
         if (!ct.includes("application/json")) {
           const invalid = buildInvalidImageResult(workerVersion, rayId);
+          invalid.input_echo = { context: {} };
           return json(invalid, 422, baseHeaders);
         }
 
@@ -1047,15 +1090,13 @@ export default {
         }
 
         console.log("[ANALYZE] body keys", Object.keys(body));
-        const contextInput =
+        context =
           body &&
           (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
             ? (((body as any).context || (body as any).context_input) as Record<string, unknown>)
-            : null;
-        console.log(
-          "[ANALYZE] context_input keys",
-          contextInput ? Object.keys(contextInput) : []
-        );
+            : {};
+        console.log("[ANALYZE] context keys", Object.keys(context || {}));
+        (body as any).context = context || {};
         const verifyHeader = request.headers.get("x-verify-token");
         const verifyEnabled = !!env.VERIFY_TOKEN;
         const verifyMatched = verifyEnabled && verifyHeader === env.VERIFY_TOKEN;
@@ -1076,6 +1117,7 @@ export default {
         if (!image || image.trim().length < 10 || image.trim() === "test") {
           console.log("[ANALYZE] missing image keys", Object.keys(body));
           const invalid = buildInvalidImageResult(workerVersion, rayId);
+          invalid.input_echo = { context };
           return json(invalid, 422, baseHeaders);
         }
 
@@ -1083,6 +1125,7 @@ export default {
         const dims = imageBytes ? getImageDimensions(imageBytes) : null;
         if (!imageBytes || !dims || dims.width < 512 || dims.height < 512) {
           const invalid = buildInvalidImageResult(workerVersion, rayId);
+          invalid.input_echo = { context };
           return json(invalid, 422, baseHeaders);
         }
 
@@ -1138,6 +1181,7 @@ export default {
                 proxyVersion,
                 modelUsed
               );
+              normalized.input_echo = { context };
               return json(normalized, 200, proxyHeaders);
             }
             const err = buildProxyErrorResult(
@@ -1147,6 +1191,7 @@ export default {
               text || `proxy status ${proxyResp.status}`,
               rayId
             );
+            (err as any).input_echo = { context };
             return json(err, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
@@ -1162,6 +1207,7 @@ export default {
             proxyVersion,
             modelUsed
           );
+          normalized.input_echo = { context };
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
             if (guardFlag === false) {
@@ -1182,6 +1228,7 @@ export default {
             },
             workerVersion
           );
+          normalized.input_echo = { context };
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1231,6 +1278,7 @@ export default {
             undefined,
             directModel
           );
+          normalized.input_echo = { context };
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1243,6 +1291,7 @@ export default {
             undefined,
             directModel
           );
+          normalized.input_echo = { context };
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let parsed: any = {};
@@ -1255,9 +1304,11 @@ export default {
             undefined,
             directModel
           );
+          normalized.input_echo = { context };
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         const normalized = normalizeV2(parsed, workerVersion, undefined, directModel);
+        normalized.input_echo = { context };
         return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
       } catch (error: any) {
         console.log("[OPENAI] catch");
@@ -1269,6 +1320,7 @@ export default {
           undefined,
           "unknown"
         );
+        normalized.input_echo = { context: {} };
         return json(normalized, 200, baseHeaders);
       }
     }
