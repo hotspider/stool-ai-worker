@@ -797,6 +797,15 @@ export default {
           if (!proxyResp.ok || (data as any)?.ok === false || (data as any)?.error) {
             const modelUsed =
               (data as any)?.model_used || proxyModel || "unknown";
+            if ((data as any)?.error_code) {
+              const normalized = normalizeV2(
+                data,
+                workerVersion,
+                proxyVersion,
+                modelUsed
+              );
+              return json(normalized, 200, proxyHeaders);
+            }
             const err = buildProxyErrorResult(
               workerVersion,
               proxyVersion,
