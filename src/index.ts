@@ -153,6 +153,11 @@ function buildDefaultResult() {
     ok: true,
     schema_version: SCHEMA_VERSION,
     is_stool_image: true,
+    stool_confidence: null,
+    stool_scene: "unknown",
+    stool_form_hint: "unknown",
+    not_stool_reason: "",
+    stool_detection_rationale: "",
     worker_version: "",
     proxy_version: "unknown",
     model_used: "unknown",
@@ -510,6 +515,124 @@ function contextAffectsFromInput(ctx: Record<string, unknown>) {
   return items;
 }
 
+function applyNonStoolOverrides(out: any, contextAffects: string[]) {
+  out.stool_features = null;
+  out.possible_causes = [];
+  out.reasoning_bullets = [];
+  out.actions_today = { diet: [], hydration: [], care: [], avoid: [], observe: [] };
+  out.red_flags = [];
+  out.follow_up_questions = ["是否选错了图片？", "是否需要重新拍摄更清晰的照片？"];
+  out.interpretation = {
+    ...out.interpretation,
+    overall_judgement: "无法判断是否为大便图片",
+    why_shape: [],
+    why_color: [],
+    why_texture: [],
+    how_context_affects: contextAffects.length
+      ? contextAffects
+      : ["本次仅用于确认是否为大便图片"],
+    confidence_explain: "当前图片未识别为大便，无法进入健康分析。",
+  };
+  out.context_summary = hasContextInput(out.input_echo?.context || {})
+    ? contextSummaryFromInput(out.input_echo?.context || {})
+    : "本次仅用于确认是否为大便图片。";
+  out.doctor_explanation = {
+    one_sentence_conclusion: out.headline || "这张图片未识别到大便，暂时无法分析。",
+    shape: "",
+    color: "",
+    texture: "",
+    visual_analysis: { shape: "", color: "", texture: "" },
+    combined_judgement: "",
+    causes: "",
+    todo: "",
+    red_flags: "",
+    reassure: "",
+  };
+  out.ui_strings = {
+    summary: "未识别到大便图片，建议重新拍摄后再分析。",
+    tags: ["非大便图片"],
+    sections: [
+      {
+        title: "无法分析的原因",
+        icon_key: "camera",
+        items: ["图片中未识别到大便", "可能拍到其他物体或场景", "目标不清晰或被遮挡"],
+      },
+      {
+        title: "如何重拍",
+        icon_key: "retry",
+        items: ["光线充足，避免背光/反光", "对焦清晰，目标占画面 50% 以上", "尽量减少背景干扰"],
+      },
+      {
+        title: "常见错误示例",
+        icon_key: "info",
+        items: ["拍到纸巾/地面/玩具/衣物", "画面过暗或强反光", "目标过小或被遮挡"],
+      },
+    ],
+    longform: {
+      conclusion: "这张图片未识别到大便，暂时无法分析。",
+      how_to_read: "当前图片无法用于判断大便性状，请更清晰地重新拍摄。",
+      context: "本次仅用于确认是否为大便图片，无需补充更多信息。",
+      causes: "可能选错图片或目标未清晰入镜。",
+      todo: "请重新拍摄：光线充足、对焦清晰、目标占画面 50% 以上。",
+      red_flags: "如宝宝出现持续发热、便血或精神明显差，请及时就医。",
+      reassure: "这是识别失败提示，并非健康结论。",
+    },
+  };
+  if (!out.image_validation) {
+    out.image_validation = {
+      status: "not_stool",
+      reason: out.explanation || "未识别到大便图像。",
+      tips: ["对焦清晰", "光线充足", "目标占画面 50% 以上"],
+    };
+  }
+  return out;
+}
+
+function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: string[]) {
+  const conf = Number.isFinite(Number(out.stool_confidence))
+    ? Number(out.stool_confidence)
+    : Number.isFinite(Number(out.image_validation?.stool_confidence))
+      ? Number(out.image_validation.stool_confidence)
+      : NaN;
+  if (!Number.isFinite(conf)) {
+    return { out, applied: false, proceed: out.is_stool_image === true };
+  }
+  const lowFloor = userConfirmed ? 0.18 : 0.25;
+  const proceed = conf >= 0.45 || conf >= lowFloor;
+  const lowConf = conf >= lowFloor && conf < 0.45;
+
+  if (!proceed) {
+    out.ok = false;
+    out.is_stool_image = false;
+    out.error_code = "NOT_STOOL_IMAGE";
+    out.error = "NOT_STOOL_IMAGE";
+    out.headline = out.headline || "这张图片未识别到大便，暂时无法分析";
+    out.confidence = Math.min(out.confidence || 0, conf || 0);
+    out.uncertainty_note = "图片未识别为大便，建议更清晰的近距离重拍。";
+    out = applyNonStoolOverrides(out, contextAffects);
+    return { out, applied: true, proceed: false, lowConf: false, conf };
+  }
+
+  out.ok = true;
+  out.is_stool_image = true;
+  out.error_code = undefined;
+  out.error = undefined;
+  if (lowConf) {
+    out.confidence = Math.min(0.4, out.confidence || 1, conf);
+    out.uncertainty_note =
+      "识别不确定（可能为糊状/尿不湿场景），仍提供参考分析，建议补拍清晰近距图片。";
+    out.image_validation = {
+      status: "low_confidence",
+      reason: out.stool_detection_rationale || "识别置信度较低",
+      tips: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+      stool_confidence: conf,
+      stool_scene: out.stool_scene || "unknown",
+      stool_form_hint: out.stool_form_hint || "unknown",
+    };
+  }
+  return { out, applied: true, proceed: true, lowConf, conf };
+}
+
 function normalizeV2(
   parsed: any,
   workerVersion: string,
@@ -539,6 +662,18 @@ function normalizeV2(
   out.primary_error = typeof out.primary_error === "string" ? out.primary_error : "";
   out.image_validation =
     out.image_validation && typeof out.image_validation === "object" ? out.image_validation : null;
+  out.stool_confidence = Number.isFinite(Number(out.stool_confidence))
+    ? Number(out.stool_confidence)
+    : base.stool_confidence;
+  out.stool_scene = typeof out.stool_scene === "string" && out.stool_scene.trim()
+    ? out.stool_scene.trim()
+    : base.stool_scene;
+  out.stool_form_hint = typeof out.stool_form_hint === "string" && out.stool_form_hint.trim()
+    ? out.stool_form_hint.trim()
+    : base.stool_form_hint;
+  out.not_stool_reason = typeof out.not_stool_reason === "string" ? out.not_stool_reason : "";
+  out.stool_detection_rationale =
+    typeof out.stool_detection_rationale === "string" ? out.stool_detection_rationale : "";
   out.context_input = out.context_input && typeof out.context_input === "object" ? out.context_input : undefined;
   out.input_context = out.input_context && typeof out.input_context === "object" ? out.input_context : out.context_input;
   out.context_summary = typeof out.context_summary === "string" ? out.context_summary : "";
@@ -779,78 +914,8 @@ function normalizeV2(
         "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
   }
-
   if (out.is_stool_image === false) {
-    out.stool_features = null;
-    out.possible_causes = [];
-    out.reasoning_bullets = [];
-    out.actions_today = { diet: [], hydration: [], care: [], avoid: [], observe: [] };
-    out.red_flags = [];
-    out.follow_up_questions = ["是否选错了图片？", "是否需要重新拍摄更清晰的照片？"];
-    out.interpretation = {
-      ...out.interpretation,
-      overall_judgement: "无法判断是否为大便图片",
-      why_shape: [],
-      why_color: [],
-      why_texture: [],
-      how_context_affects: contextAffects.length
-        ? contextAffects
-        : ["本次仅用于确认是否为大便图片"],
-      confidence_explain: "当前图片未识别为大便，无法进入健康分析。",
-    };
-    out.context_summary = hasContextInput(out.input_echo.context || {})
-      ? contextSummaryFromInput(out.input_echo.context || {})
-      : "本次仅用于确认是否为大便图片。";
-    out.doctor_explanation = {
-      one_sentence_conclusion: out.headline || "这张图片未识别到大便，暂时无法分析。",
-      shape: "",
-      color: "",
-      texture: "",
-      visual_analysis: { shape: "", color: "", texture: "" },
-      combined_judgement: "",
-      causes: "",
-      todo: "",
-      red_flags: "",
-      reassure: "",
-    };
-    out.ui_strings = {
-      summary: "未识别到大便图片，建议重新拍摄后再分析。",
-      tags: ["非大便图片"],
-      sections: [
-        {
-          title: "无法分析的原因",
-          icon_key: "camera",
-          items: ["图片中未识别到大便", "可能拍到其他物体或场景", "目标不清晰或被遮挡"],
-        },
-        {
-          title: "如何重拍",
-          icon_key: "retry",
-          items: ["光线充足，避免背光/反光", "对焦清晰，目标占画面 50% 以上", "尽量减少背景干扰"],
-        },
-        {
-          title: "常见错误示例",
-          icon_key: "info",
-          items: ["拍到纸巾/地面/玩具/衣物", "画面过暗或强反光", "目标过小或被遮挡"],
-        },
-      ],
-      longform: {
-        conclusion: "这张图片未识别到大便，暂时无法分析。",
-        how_to_read: "当前图片无法用于判断大便性状，请更清晰地重新拍摄。",
-        context: "本次仅用于确认是否为大便图片，无需补充更多信息。",
-        causes: "可能选错图片或目标未清晰入镜。",
-        todo: "请重新拍摄：光线充足、对焦清晰、目标占画面 50% 以上。",
-        red_flags: "如宝宝出现持续发热、便血或精神明显差，请及时就医。",
-        reassure: "这是识别失败提示，并非健康结论。",
-      },
-    };
-    if (!out.image_validation) {
-      out.image_validation = {
-        status: "not_stool",
-        reason: out.explanation || "未识别到大便图像。",
-        tips: ["对焦清晰", "光线充足", "目标占画面 50% 以上"],
-      };
-    }
-    return out;
+    return applyNonStoolOverrides(out, contextAffects);
   }
 
   out.possible_causes = ensureMinItems(
@@ -1328,6 +1393,10 @@ export default {
         }
 
         console.log("[ANALYZE] body keys", Object.keys(body));
+        const userConfirmedStool =
+          typeof (body as any).user_confirmed_stool === "boolean"
+            ? (body as any).user_confirmed_stool
+            : false;
         context =
           body &&
           (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
@@ -1423,12 +1492,19 @@ export default {
             const modelUsed =
               (data as any)?.model_used || proxyModel || "unknown";
             if ((data as any)?.error_code) {
-              const normalized = normalizeV2(
+            let normalized = normalizeV2(
                 data,
                 workerVersion,
                 proxyVersion,
                 modelUsed
               );
+            const decision = applyDetectionPolicy(normalized, userConfirmedStool, contextAffectsFromInput(context));
+            normalized = decision.out;
+            if (decision.applied) {
+              console.log(
+                `[DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+              );
+            }
               normalized.input_echo = { context };
               return json(normalized, 200, proxyHeaders);
             }
@@ -1450,12 +1526,19 @@ export default {
             (data as any)?.model_used ||
             proxyModel ||
             "unknown";
-          const normalized = normalizeV2(
+          let normalized = normalizeV2(
             data,
             workerVersion,
             proxyVersion,
             modelUsed
           );
+          const decision = applyDetectionPolicy(normalized, userConfirmedStool, contextAffectsFromInput(context));
+          normalized = decision.out;
+          if (decision.applied) {
+            console.log(
+              `[DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+            );
+          }
           normalized.input_echo = { context };
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
