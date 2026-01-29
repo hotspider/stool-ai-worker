@@ -20,21 +20,20 @@ curl -sS -D "$RESP_HEADERS" -o "$RESP_BODY" -X POST "https://api.tapgiga.com/ana
   -d "{\"image\":\"$BASE64_IMAGE\",\"age_months\":30,\"odor\":\"none\",\"pain_or_strain\":false,\"diet_keywords\":\"banana\",\"context\":{\"foods_eaten\":\"米饭,香蕉\",\"drinks_taken\":\"温水\",\"mood_state\":\"精神好\",\"other_notes\":\"无\"}}"
 
 echo "=== Response headers ==="
-grep -iE "x-worker-version|x-proxy-version|x-openai-model|schema_version|x-request-id" "$RESP_HEADERS" || true
+grep -iE "x-worker-version|x-proxy-version|x-openai-model|schema_version|x-request-id|x-build-id" "$RESP_HEADERS" || true
 
 echo ""
+echo "=== Response raw body (first 400 chars) ==="
+head -c 400 "$RESP_BODY" || true
+echo ""
+echo ""
 echo "=== Response JSON (key fields) ==="
-python3 - <<'PY'
-import json
-import sys
-from pathlib import Path
-
-body = Path(sys.argv[1]).read_text(encoding="utf-8")
-data = json.loads(body)
-keys = ["is_stool_image", "headline", "error_code", "stool_confidence", "stool_scene", "stool_form_hint"]
-print({k: data.get(k) for k in keys})
-PY
-"$RESP_BODY"
+if command -v jq >/dev/null 2>&1; then
+  jq '{ok, error_code, error, message, is_stool_image, confidence, model_used, proxy_version, worker_version, stool_confidence, stool_scene, stool_form_hint}' "$RESP_BODY" || cat "$RESP_BODY"
+else
+  echo "jq 未安装，打印原文："
+  cat "$RESP_BODY"
+fi
 
 echo ""
 echo "请在另一个终端执行："

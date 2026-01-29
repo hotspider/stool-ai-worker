@@ -588,6 +588,18 @@ function applyNonStoolOverrides(out: any, contextAffects: string[]) {
   return out;
 }
 
+function isUpstreamError(out: any) {
+  const code = String(out?.error_code || out?.error || "").toUpperCase();
+  return (
+    code.includes("PROXY_ERROR") ||
+    code.includes("UPSTREAM_INVALID_JSON") ||
+    code.includes("INVALID_JSON") ||
+    code.includes("OPENAI_ERROR") ||
+    code.includes("PROXY_EXCEPTION") ||
+    code.includes("PROXY_NORMALIZE_CRASH")
+  );
+}
+
 function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: string[]) {
   const conf = Number.isFinite(Number(out.stool_confidence))
     ? Number(out.stool_confidence)
@@ -639,7 +651,11 @@ function truncateLogText(value: unknown, limit = 200) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
-function logDetect(out: any, requestId: string, decision: "block_not_stool" | "proceed_analysis") {
+function logDetect(
+  out: any,
+  requestId: string,
+  decision: "block_not_stool" | "block_upstream_error" | "proceed_analysis"
+) {
   const validation = out?.image_validation || {};
   const reason = truncateLogText(out?.not_stool_reason, 200);
   const valReason = truncateLogText(validation?.reason, 200);
@@ -952,7 +968,7 @@ function normalizeV2(
         "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
   }
-  if (out.is_stool_image === false) {
+  if (out.is_stool_image === false && !isUpstreamError(out)) {
     return applyNonStoolOverrides(out, contextAffects);
   }
 
@@ -1546,23 +1562,27 @@ export default {
                 proxyVersion,
                 modelUsed
               );
-              const decision = applyDetectionPolicy(
-                normalized,
-                userConfirmedStool,
-                contextAffectsFromInput(context)
-              );
-              normalized = decision.out;
-              if (decision.applied) {
-                console.log(
-                  `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+              let decisionLabel: "block_not_stool" | "block_upstream_error" | "proceed_analysis" =
+                "proceed_analysis";
+              if (isUpstreamError(normalized)) {
+                normalized.is_stool_image = null as any;
+                decisionLabel = "block_upstream_error";
+              } else {
+                const decision = applyDetectionPolicy(
+                  normalized,
+                  userConfirmedStool,
+                  contextAffectsFromInput(context)
                 );
+                normalized = decision.out;
+                if (decision.applied) {
+                  console.log(
+                    `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+                  );
+                  decisionLabel = decision.proceed ? "proceed_analysis" : "block_not_stool";
+                }
               }
               normalized.input_echo = { context };
-              logDetect(
-                normalized,
-                requestId,
-                decision.proceed ? "proceed_analysis" : "block_not_stool"
-              );
+              logDetect(normalized, requestId, decisionLabel);
               return json(normalized, 200, proxyHeaders);
             }
             const err = buildProxyErrorResult(
@@ -1590,19 +1610,27 @@ export default {
             proxyVersion,
             modelUsed
           );
-          const decision = applyDetectionPolicy(normalized, userConfirmedStool, contextAffectsFromInput(context));
-          normalized = decision.out;
-          if (decision.applied) {
-            console.log(
-              `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+          let decisionLabel: "block_not_stool" | "block_upstream_error" | "proceed_analysis" =
+            "proceed_analysis";
+          if (isUpstreamError(normalized)) {
+            normalized.is_stool_image = null as any;
+            decisionLabel = "block_upstream_error";
+          } else {
+            const decision = applyDetectionPolicy(
+              normalized,
+              userConfirmedStool,
+              contextAffectsFromInput(context)
             );
+            normalized = decision.out;
+            if (decision.applied) {
+              console.log(
+                `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+              );
+              decisionLabel = decision.proceed ? "proceed_analysis" : "block_not_stool";
+            }
           }
           normalized.input_echo = { context };
-          logDetect(
-            normalized,
-            requestId,
-            decision.proceed ? "proceed_analysis" : "block_not_stool"
-          );
+          logDetect(normalized, requestId, decisionLabel);
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
             if (guardFlag === false) {
