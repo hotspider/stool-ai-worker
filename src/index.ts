@@ -110,11 +110,13 @@ function userPromptFromBody(body: Record<string, unknown>) {
   const odor = body?.odor ?? "unknown";
   const strain = body?.pain_or_strain;
   const diet = body?.diet_keywords ?? "";
+  const context = body?.context_input;
   return `
 幼儿月龄: ${age ?? "unknown"}
 气味: ${odor}
 是否疼痛/费力: ${typeof strain === "boolean" ? String(strain) : "unknown"}
 最近饮食关键词: ${diet || "unknown"}
+补充信息(context_input): ${context ? JSON.stringify(context) : "none"}
 
 请基于图片和以上信息给出分析与建议。
 `.trim();
@@ -122,52 +124,22 @@ function userPromptFromBody(body: Record<string, unknown>) {
 
 const SYSTEM_PROMPT = `
 你是儿科+营养师背景的健康助手。用户提供幼儿(0-36个月)大便图片与补充信息，你必须输出严格 JSON（不要 Markdown、不要额外文字）。
-输出结构必须包含所有字段（允许 null/""/[] 但字段必须存在），且不要输出任何未列出的字段。
-请尽量提供“家长可执行”的饮食/补液/护理/观察建议，并提供红旗预警。
+输出结构必须包含所有字段，且不要输出任何未列出的字段。请提供“家长可执行”的饮食/补液/护理/观察建议，并提供红旗预警。
 
-必须输出的 JSON 结构如下：
-{
-  "ok": true,
-  "headline": "一句话结论",
-  "score": 0-100,
-  "risk_level": "low|medium|high",
-  "confidence": 0.0-1.0,
-  "uncertainty_note": "不确定说明",
-  "stool_features": {
-    "bristol_type": 1-7|null,
-    "color": "string|null",
-    "texture": "string|null",
-    "volume": "small|medium|large|unknown",
-    "visible_findings": ["mucus","undigested_food","blood","foam","watery","seeds","none"]
-  },
-  "reasoning_bullets": ["要点1","要点2","要点3"],
-  "actions_today": {
-    "diet": ["饮食建议"],
-    "hydration": ["补液建议"],
-    "care": ["护理建议"],
-    "avoid": ["避免事项"]
-  },
-  "red_flags": [
-    {"title":"何时需要就医/警戒","detail":"清晰阈值描述"}
-  ],
-  "follow_up_questions": ["可补充信息1","2"],
-  "ui_strings": {
-    "summary": "2-3句总结",
-    "tags": ["Bristol 6","黄色","偏稀"],
-    "sections": [
-      {"title":"饮食","items":["..."]},
-      {"title":"补液","items":["..."]},
-      {"title":"护理","items":["..."]},
-      {"title":"警戒信号","items":["..."]}
-    ]
-  },
-  "summary": "同 ui_strings.summary",
-  "bristol_type": null,
-  "color": null,
-  "texture": null,
-  "hydration_hint": "从 actions_today.hydration 生成一句话",
-  "diet_advice": ["同 actions_today.diet"]
-}
+写作结构强约束：
+1. 必须先输出“一句话结论（先说重点）”（写进 headline / ui_strings.longform.conclusion），明确：是否像腹泻/是否像感染/更像什么。
+2. “具体怎么看这个便便”必须分为：形态/颜色/质地细节，并且每部分都要写“为什么会这样”（写进 interpretation.why_*，每项>=2）。
+3. 必须输出“结合你填写的情况（很关键）”，并引用 context_input（若提供：recent_foods、recent_drinks、精神、次数、发热、腹痛等），写入 interpretation.how_context_affects（>=3）。
+4. “可能原因”必须按常见程度排序（写入 reasoning_bullets，>=5，且每条是因果链）。
+5. “现在需要做什么”必须可执行，分 ✅可以做 / ❌少一点 / 👀观察指标（分别落在 actions_today.*）。
+6. “什么时候需要警惕”必须给明确红旗（red_flags >=5，object 结构 {title, detail}）。
+7. 最后输出“家长安心指标”一句话总结（写入 ui_strings.longform.reassure）。
+8. 语言风格：像儿科医生对家长说话，清晰克制、不吓人；禁止空话；禁止只输出泛泛建议。
+9. 必须填满 required 数组长度下限，任何数组不允许为空。
+10. 若图片无法判断，必须明确写出“缺什么信息/建议怎么拍/建议补充什么”，并仍返回完整 v2 结构（ok=false，但字段齐全）。
+
+必须输出 JSON 并严格匹配 schema_version=2 的结构。
+只输出 JSON，不要 Markdown。
 `.trim();
 
 function buildDefaultResult() {
@@ -175,6 +147,8 @@ function buildDefaultResult() {
     ok: true,
     schema_version: SCHEMA_VERSION,
     worker_version: "",
+    proxy_version: "unknown",
+    model_used: "unknown",
     headline: "",
     score: 50,
     risk_level: "low",
@@ -182,10 +156,27 @@ function buildDefaultResult() {
     uncertainty_note: "",
     stool_features: {
       bristol_type: null,
-      color: null,
-      texture: null,
+      bristol_range: "unknown",
+      shape_desc: "unknown",
+      color_desc: "unknown",
+      texture_desc: "unknown",
       volume: "unknown",
+      wateriness: "none",
+      mucus: "none",
+      foam: "none",
+      blood: "none",
+      undigested_food: "none",
+      separation_layers: "none",
+      odor_level: "unknown",
       visible_findings: ["none"],
+    },
+    interpretation: {
+      overall_judgement: "需要结合更多信息判断",
+      why_shape: ["图片角度与光线影响形态判断", "仅凭单张图片可能低估真实形态"],
+      why_color: ["颜色受光照与拍摄设备影响", "需结合近期饮食判断颜色变化"],
+      why_texture: ["质地可能受水分与拍摄焦距影响", "需结合是否拉稀或成形判断"],
+      how_context_affects: ["未提供补充信息，无法判断饮食与症状关联", "若近期有发热/腹痛需提高警惕", "若精神食欲正常则更偏功能性变化"],
+      confidence_explain: "缺少完整补充信息，置信度有限。",
     },
     reasoning_bullets: [],
     actions_today: {
@@ -193,6 +184,7 @@ function buildDefaultResult() {
       hydration: [],
       care: [],
       avoid: [],
+      observe: [],
     },
     red_flags: [],
     follow_up_questions: [],
@@ -205,6 +197,15 @@ function buildDefaultResult() {
         { title: "护理", icon_key: "care", items: [] },
         { title: "警戒信号", icon_key: "warning", items: [] },
       ],
+      longform: {
+        conclusion: "",
+        how_to_read: "",
+        context: "",
+        causes: "",
+        todo: "",
+        red_flags: "",
+        reassure: "",
+      },
     },
     summary: "",
     bristol_type: null,
@@ -223,10 +224,11 @@ const DEFAULT_REASONING = [
   "如出现不适或异常症状需及时就医",
 ];
 
-const DEFAULT_DIET = ["清淡易消化饮食", "少量多餐，观察耐受"];
-const DEFAULT_HYDRATION = ["少量多次补液", "观察尿量是否减少"];
-const DEFAULT_CARE = ["便后温水清洁并保持干爽", "注意皮肤红肿或破损"];
-const DEFAULT_AVOID = ["避免油炸/辛辣/高糖食物", "暂避冰冷刺激饮品"];
+const DEFAULT_DIET = ["清淡易消化饮食", "少量多餐，观察耐受", "适量软熟蔬果补充"];
+const DEFAULT_HYDRATION = ["少量多次补液", "观察尿量是否减少", "必要时口服补液盐"];
+const DEFAULT_CARE = ["便后温水清洁并保持干爽", "注意皮肤红肿或破损", "记录排便次数与性状变化"];
+const DEFAULT_AVOID = ["避免油炸/辛辣/高糖食物", "暂避冰冷刺激饮品", "避免一次性大量进食"];
+const DEFAULT_OBSERVE = ["精神与食欲是否下降", "排便次数是否增多", "是否伴随发热或呕吐"];
 const DEFAULT_RED_FLAGS = [
   { title: "明显便血或黑便", detail: "若出现请尽快就医" },
   { title: "持续高热或精神萎靡", detail: "超过 24 小时需就医" },
@@ -244,7 +246,9 @@ const DEFAULT_FOLLOW_UPS = [
 ];
 
 function buildInvalidImageResult(workerVersion: string, rayId?: string) {
+  const base = buildDefaultResult();
   return {
+    ...base,
     ok: false,
     error_code: "INVALID_IMAGE",
     error: "INVALID_IMAGE",
@@ -258,20 +262,8 @@ function buildInvalidImageResult(workerVersion: string, rayId?: string) {
     risk_level: "unknown",
     confidence: 0,
     uncertainty_note: "请提供清晰、光线充足的图片，并保证目标占画面主要区域。",
-    stool_features: {
-      bristol_type: null,
-      color: null,
-      texture: null,
-      volume: "unknown",
-      visible_findings: [],
-    },
-    reasoning_bullets: [],
-    actions_today: { diet: [], hydration: [], care: [], avoid: [] },
-    red_flags: [],
-    follow_up_questions: [],
     ui_strings: {
-      summary: "",
-      tags: [],
+      ...base.ui_strings,
       sections: [
         {
           title: "如何拍/如何裁剪",
@@ -283,14 +275,18 @@ function buildInvalidImageResult(workerVersion: string, rayId?: string) {
           icon_key: "question",
           items: ["气味/是否疼痛", "排便次数", "是否便血/黑便"],
         },
+        {
+          title: "观察指标",
+          icon_key: "observe",
+          items: DEFAULT_OBSERVE,
+        },
+        {
+          title: "重试建议",
+          icon_key: "retry",
+          items: ["更换清晰图片", "避免过暗或反光", "再次尝试上传"],
+        },
       ],
     },
-    summary: "",
-    bristol_type: null,
-    color: null,
-    texture: null,
-    hydration_hint: "",
-    diet_advice: [],
     rayId,
   };
 }
@@ -302,7 +298,9 @@ function buildProxyErrorResult(
   message: string,
   rayId?: string
 ) {
+  const base = buildDefaultResult();
   return {
+    ...base,
     ok: false,
     error_code: "PROXY_ERROR",
     error: "PROXY_ERROR",
@@ -316,20 +314,8 @@ function buildProxyErrorResult(
     risk_level: "unknown",
     confidence: 0,
     uncertainty_note: "服务繁忙或网络异常，可稍后重试或更换清晰图片。",
-    stool_features: {
-      bristol_type: null,
-      color: null,
-      texture: null,
-      volume: "unknown",
-      visible_findings: [],
-    },
-    reasoning_bullets: [],
-    actions_today: { diet: [], hydration: [], care: [], avoid: [] },
-    red_flags: [],
-    follow_up_questions: [],
     ui_strings: {
-      summary: "",
-      tags: [],
+      ...base.ui_strings,
       sections: [
         {
           title: "重试建议",
@@ -341,14 +327,18 @@ function buildProxyErrorResult(
           icon_key: "camera",
           items: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
         },
+        {
+          title: "建议补充信息",
+          icon_key: "question",
+          items: ["是否发热/呕吐", "24h 排便次数", "近期饮食与饮水"],
+        },
+        {
+          title: "观察指标",
+          icon_key: "observe",
+          items: DEFAULT_OBSERVE,
+        },
       ],
     },
-    summary: "",
-    bristol_type: null,
-    color: null,
-    texture: null,
-    hydration_hint: "",
-    diet_advice: [],
     rayId,
   };
 }
@@ -441,17 +431,17 @@ function normalizeV2(
   const out = { ...base, ...(parsed || {}) } as any;
 
   const stool = { ...base.stool_features, ...(out.stool_features || {}) };
+  const interpretation = { ...base.interpretation, ...(out.interpretation || {}) };
   const actions = { ...base.actions_today, ...(out.actions_today || {}) };
   const ui = { ...base.ui_strings, ...(out.ui_strings || {}) };
+  const longform = { ...base.ui_strings.longform, ...(ui.longform || {}) };
 
   out.ok = out.ok === false ? false : true;
   out.schema_version = SCHEMA_VERSION;
   out.worker_version = out.worker_version || workerVersion;
-  if (proxyVersion) {
-    out.proxy_version = proxyVersion;
-  }
-  out.proxy_version = out.proxy_version || "unknown";
+  out.proxy_version = proxyVersion || out.proxy_version || "unknown";
   out.model_used = modelUsed || out.model_used || "unknown";
+  out.context_input = out.context_input && typeof out.context_input === "object" ? out.context_input : undefined;
 
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
   out.confidence = Number.isFinite(Number(out.confidence))
@@ -459,7 +449,7 @@ function normalizeV2(
     : base.confidence;
   out.uncertainty_note = typeof out.uncertainty_note === "string" ? out.uncertainty_note : "";
   out.headline = typeof out.headline === "string" ? out.headline : "";
-  out.risk_level = ["low", "medium", "high"].includes(out.risk_level)
+  out.risk_level = ["low", "medium", "high", "unknown"].includes(out.risk_level)
     ? out.risk_level
     : base.risk_level;
   if (!out.ok) {
@@ -473,14 +463,65 @@ function normalizeV2(
         : Number.isFinite(Number(stool.bristol_type))
             ? Number(stool.bristol_type)
             : null,
-    color: stool.color ?? null,
-    texture: stool.texture ?? null,
+    bristol_range:
+      typeof stool.bristol_range === "string" && stool.bristol_range.trim()
+        ? stool.bristol_range.trim()
+        : base.stool_features.bristol_range,
+    shape_desc:
+      typeof stool.shape_desc === "string" && stool.shape_desc.trim()
+        ? stool.shape_desc.trim()
+        : base.stool_features.shape_desc,
+    color_desc:
+      typeof stool.color_desc === "string" && stool.color_desc.trim()
+        ? stool.color_desc.trim()
+        : base.stool_features.color_desc,
+    texture_desc:
+      typeof stool.texture_desc === "string" && stool.texture_desc.trim()
+        ? stool.texture_desc.trim()
+        : base.stool_features.texture_desc,
     volume: ["small", "medium", "large", "unknown"].includes(stool.volume)
       ? stool.volume
+      : "unknown",
+    wateriness: ["none", "mild", "moderate", "severe"].includes(stool.wateriness)
+      ? stool.wateriness
+      : "none",
+    mucus: ["none", "suspected", "present"].includes(stool.mucus) ? stool.mucus : "none",
+    foam: ["none", "suspected", "present"].includes(stool.foam) ? stool.foam : "none",
+    blood: ["none", "suspected", "present"].includes(stool.blood) ? stool.blood : "none",
+    undigested_food: ["none", "suspected", "present"].includes(stool.undigested_food)
+      ? stool.undigested_food
+      : "none",
+    separation_layers: ["none", "suspected", "present"].includes(stool.separation_layers)
+      ? stool.separation_layers
+      : "none",
+    odor_level: ["normal", "strong", "very_strong", "unknown"].includes(stool.odor_level)
+      ? stool.odor_level
       : "unknown",
     visible_findings: Array.isArray(stool.visible_findings)
       ? stool.visible_findings.map(String)
       : [],
+  };
+  out.stool_features.visible_findings = ensureMinItems(
+    out.stool_features.visible_findings,
+    1,
+    ["none"]
+  );
+
+  out.interpretation = {
+    overall_judgement:
+      typeof interpretation.overall_judgement === "string" && interpretation.overall_judgement.trim()
+        ? interpretation.overall_judgement.trim()
+        : base.interpretation.overall_judgement,
+    why_shape: Array.isArray(interpretation.why_shape) ? interpretation.why_shape.map(String) : [],
+    why_color: Array.isArray(interpretation.why_color) ? interpretation.why_color.map(String) : [],
+    why_texture: Array.isArray(interpretation.why_texture) ? interpretation.why_texture.map(String) : [],
+    how_context_affects: Array.isArray(interpretation.how_context_affects)
+      ? interpretation.how_context_affects.map(String)
+      : [],
+    confidence_explain:
+      typeof interpretation.confidence_explain === "string" && interpretation.confidence_explain.trim()
+        ? interpretation.confidence_explain.trim()
+        : base.interpretation.confidence_explain,
   };
 
   out.reasoning_bullets = ensureMinItems(
@@ -492,23 +533,28 @@ function normalizeV2(
   out.actions_today = {
     diet: ensureMinItems(
       Array.isArray(actions.diet) ? actions.diet.map(String) : [],
-      2,
+      3,
       DEFAULT_DIET
     ),
     hydration: ensureMinItems(
       Array.isArray(actions.hydration) ? actions.hydration.map(String) : [],
-      2,
+      3,
       DEFAULT_HYDRATION
     ),
     care: ensureMinItems(
       Array.isArray(actions.care) ? actions.care.map(String) : [],
-      2,
+      3,
       DEFAULT_CARE
     ),
     avoid: ensureMinItems(
       Array.isArray(actions.avoid) ? actions.avoid.map(String) : [],
-      2,
+      3,
       DEFAULT_AVOID
+    ),
+    observe: ensureMinItems(
+      Array.isArray(actions.observe) ? actions.observe.map(String) : [],
+      3,
+      DEFAULT_OBSERVE
     ),
   };
 
@@ -516,11 +562,15 @@ function normalizeV2(
     Array.isArray(out.red_flags)
       ? out.red_flags.map((item: any) => {
           if (typeof item === "string") {
-            return { title: item, detail: "" };
+            return { title: item, detail: "如出现请及时就医或咨询医生。" };
           }
           return {
-            title: item?.title ? String(item.title) : "",
-            detail: item?.detail ? String(item.detail) : item?.why ? String(item.why) : "",
+            title: item?.title ? String(item.title) : "需要警惕的情况",
+            detail: item?.detail
+              ? String(item.detail)
+              : item?.why
+                  ? String(item.why)
+                  : "如出现请及时就医或咨询医生。",
           };
         })
       : [],
@@ -535,15 +585,10 @@ function normalizeV2(
 
   const normalizedSections = Array.isArray(ui.sections)
     ? ui.sections.map((sec: any) => {
-        const items = Array.isArray(sec?.items)
-          ? sec.items
-          : Array.isArray(sec?.bullets)
-              ? sec.bullets
-              : [];
         return {
           title: sec?.title ? String(sec.title) : "",
-          icon_key: sec?.icon_key ? String(sec.icon_key) : "",
-          items: Array.isArray(items) ? items.map(String) : [],
+          icon_key: sec?.icon_key ? String(sec.icon_key) : "info",
+          items: Array.isArray(sec?.items) ? sec.items.map(String) : [],
         };
       })
     : [];
@@ -552,27 +597,56 @@ function normalizeV2(
     summary: typeof ui.summary === "string" ? ui.summary : out.summary,
     tags: Array.isArray(ui.tags) ? ui.tags.map(String) : [],
     sections: normalizedSections,
+    longform: {
+      conclusion:
+        typeof longform.conclusion === "string" && longform.conclusion.trim()
+          ? longform.conclusion.trim()
+          : "",
+      how_to_read:
+        typeof longform.how_to_read === "string" && longform.how_to_read.trim()
+          ? longform.how_to_read.trim()
+          : "",
+      context:
+        typeof longform.context === "string" && longform.context.trim()
+          ? longform.context.trim()
+          : "",
+      causes:
+        typeof longform.causes === "string" && longform.causes.trim()
+          ? longform.causes.trim()
+          : "",
+      todo:
+        typeof longform.todo === "string" && longform.todo.trim()
+          ? longform.todo.trim()
+          : "",
+      red_flags:
+        typeof longform.red_flags === "string" && longform.red_flags.trim()
+          ? longform.red_flags.trim()
+          : "",
+      reassure:
+        typeof longform.reassure === "string" && longform.reassure.trim()
+          ? longform.reassure.trim()
+          : "",
+    },
   };
 
   const baseSections = base.ui_strings.sections;
-  const sections = ensureMinItems(
-    out.ui_strings.sections,
-    4,
-    baseSections
-  ).map((sec: any, idx: number) => ({
-    title: sec.title || baseSections[idx % baseSections.length].title,
-    icon_key: sec.icon_key || baseSections[idx % baseSections.length].icon_key,
-    items: ensureMinItems(
-      Array.isArray(sec.items) ? sec.items.map(String) : [],
-      3,
-      [
-        ...out.actions_today.diet,
-        ...out.actions_today.hydration,
-        ...out.actions_today.care,
-        ...out.actions_today.avoid,
-      ]
-    ),
-  }));
+  const sections = ensureMinItems(out.ui_strings.sections, 4, baseSections).map(
+    (sec: any, idx: number) => ({
+      title: sec.title || baseSections[idx % baseSections.length].title,
+      icon_key: sec.icon_key || baseSections[idx % baseSections.length].icon_key,
+      items: ensureMinItems(
+        Array.isArray(sec.items) ? sec.items.map(String) : [],
+        3,
+        [
+          ...out.actions_today.diet,
+          ...out.actions_today.hydration,
+          ...out.actions_today.care,
+          ...out.actions_today.avoid,
+          ...out.actions_today.observe,
+        ]
+      ),
+    })
+  );
 
   const dupSections = sections.every((sec) => {
     const key = JSON.stringify(sec.items || []);
@@ -584,31 +658,31 @@ function normalizeV2(
         {
           title: "饮食",
           icon_key: "diet",
-          items: ensureMinItems(out.actions_today.diet, 2, ["清淡饮食", "少量多餐"]),
+          items: ensureMinItems(out.actions_today.diet, 3, DEFAULT_DIET),
         },
         {
           title: "补液",
           icon_key: "hydration",
-          items: ensureMinItems(out.actions_today.hydration, 2, ["少量多次补液", "观察尿量"]),
+          items: ensureMinItems(out.actions_today.hydration, 3, DEFAULT_HYDRATION),
         },
         {
           title: "护理",
           icon_key: "care",
-          items: ensureMinItems(out.actions_today.care, 2, ["便后清洁", "保持干爽"]),
+          items: ensureMinItems(out.actions_today.care, 3, DEFAULT_CARE),
         },
         {
           title: "警戒信号",
           icon_key: "warning",
           items: ensureMinItems(
-            out.red_flags.map((f: any) => `${f.title} ${f.detail}`.trim()),
-            2,
-            ["出现便血或黑便", "持续高热或明显不适"]
+            out.red_flags.map((f: any) => f.title || f.detail),
+            3,
+            ["出现便血或黑便", "持续高热或明显不适", "频繁呕吐"]
           ),
         },
         {
-          title: "追问问题",
-          icon_key: "question",
-          items: ensureMinItems(out.follow_up_questions, 2, ["是否发热？", "24小时内排便次数多少？"]),
+          title: "观察指标",
+          icon_key: "observe",
+          items: ensureMinItems(out.actions_today.observe, 3, DEFAULT_OBSERVE),
         },
       ]
     : sections;
@@ -624,9 +698,51 @@ function normalizeV2(
     out.ui_strings.summary ||
     [out.headline, ...out.reasoning_bullets.slice(0, 2)].filter(Boolean).join("，");
 
+  out.interpretation.why_shape = ensureMinItems(
+    out.interpretation.why_shape,
+    2,
+    base.interpretation.why_shape
+  );
+  out.interpretation.why_color = ensureMinItems(
+    out.interpretation.why_color,
+    2,
+    base.interpretation.why_color
+  );
+  out.interpretation.why_texture = ensureMinItems(
+    out.interpretation.why_texture,
+    2,
+    base.interpretation.why_texture
+  );
+  out.interpretation.how_context_affects = ensureMinItems(
+    out.interpretation.how_context_affects,
+    3,
+    base.interpretation.how_context_affects
+  );
+
+  out.ui_strings.longform = {
+    conclusion: out.ui_strings.longform.conclusion || out.headline || "整体情况需要继续观察。",
+    how_to_read:
+      out.ui_strings.longform.how_to_read ||
+      `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`,
+    context:
+      out.ui_strings.longform.context ||
+      out.interpretation.how_context_affects.join("；"),
+    causes:
+      out.ui_strings.longform.causes || out.reasoning_bullets.slice(0, 3).join("；"),
+    todo:
+      out.ui_strings.longform.todo ||
+      `✅可以做：${out.actions_today.diet.slice(0, 2).join("；")}；❌少一点：${out.actions_today.avoid.slice(0, 2).join("；")}；👀观察：${out.actions_today.observe.slice(0, 2).join("；")}`,
+    red_flags:
+      out.ui_strings.longform.red_flags ||
+      out.red_flags.slice(0, 2).map((f: any) => `${f.title}（${f.detail}）`).join("；"),
+    reassure:
+      out.ui_strings.longform.reassure ||
+      "若精神和食欲良好、尿量正常，通常可先在家观察并记录变化。",
+  };
+
   out.bristol_type = out.stool_features.bristol_type ?? null;
-  out.color = out.stool_features.color ?? null;
-  out.texture = out.stool_features.texture ?? null;
+  out.color = out.stool_features.color_desc ?? null;
+  out.texture = out.stool_features.texture_desc ?? null;
   out.hydration_hint = out.actions_today.hydration[0] || "";
   out.diet_advice = out.actions_today.diet || [];
 
@@ -644,10 +760,29 @@ function upgradeLegacyResult(input: any) {
   if (!out.stool_features) {
     out.stool_features = {
       bristol_type: out.bristol_type ?? null,
-      color: out.color ?? null,
-      texture: out.texture ?? null,
+      bristol_range: "unknown",
+      shape_desc: "未知形态",
+      color_desc: out.color ?? "未知颜色",
+      texture_desc: out.texture ?? "未知质地",
       volume: "unknown",
+      wateriness: "none",
+      mucus: "none",
+      foam: "none",
+      blood: "none",
+      undigested_food: "none",
+      separation_layers: "none",
+      odor_level: "unknown",
       visible_findings: ["none"],
+    };
+  }
+  if (!out.interpretation) {
+    out.interpretation = {
+      overall_judgement: "需结合更多信息判断",
+      why_shape: ["图片角度可能影响判断", "仅凭单张图片信息有限"],
+      why_color: ["颜色受光线影响", "需结合饮食判断"],
+      why_texture: ["质地受含水量影响", "需结合排便情况判断"],
+      how_context_affects: ["未提供补充信息", "若精神食欲良好更偏功能性", "若有发热腹痛需警惕"],
+      confidence_explain: "缺少完整补充信息，置信度有限。",
     };
   }
   if (!out.reasoning_bullets) out.reasoning_bullets = [];
@@ -657,6 +792,7 @@ function upgradeLegacyResult(input: any) {
       hydration: out.hydration_hint ? [out.hydration_hint] : [],
       care: Array.isArray(out.care_advice) ? out.care_advice : [],
       avoid: [],
+      observe: [],
     };
   }
   if (!out.red_flags) out.red_flags = [];
@@ -666,6 +802,17 @@ function upgradeLegacyResult(input: any) {
       summary: out.summary ?? "",
       tags: [],
       sections: [],
+    };
+  }
+  if (!out.ui_strings.longform) {
+    out.ui_strings.longform = {
+      conclusion: "",
+      how_to_read: "",
+      context: "",
+      causes: "",
+      todo: "",
+      red_flags: "",
+      reassure: "",
     };
   }
   return out;
@@ -733,7 +880,6 @@ export default {
 
         const raw = await request.text();
         console.log("[ANALYZE] rawLen=" + raw.length);
-        console.log("[ANALYZE] rawPreview=" + raw.slice(0, 200));
         let body: Record<string, unknown> = {};
         try {
           body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -742,6 +888,12 @@ export default {
         }
 
         console.log("[ANALYZE] body keys", Object.keys(body));
+        const contextInput =
+          body && typeof body.context_input === "object" ? (body.context_input as Record<string, unknown>) : null;
+        console.log(
+          "[ANALYZE] context_input keys",
+          contextInput ? Object.keys(contextInput) : []
+        );
         console.log("[ANALYZE] image type", typeof body.image);
         console.log(
           "[ANALYZE] image length",
