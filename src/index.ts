@@ -1,6 +1,7 @@
 export interface Env {
   OPENAI_API_KEY: string;
   OPENAI_PROXY_URL?: string;
+  OPENAI_PROXY_BASE_URL?: string;
   WORKER_VERSION?: string;
   VERIFY_TOKEN?: string;
 }
@@ -188,6 +189,10 @@ function buildDefaultResult() {
       texture: "",
       visual_analysis: { shape: "", color: "", texture: "" },
       combined_judgement: "",
+      causes: "可能与饮食结构或短期消化变化有关，需结合近期情况判断。",
+      todo: "建议补拍清晰图片并记录 24-48 小时变化，必要时咨询医生。",
+      red_flags: "如出现发热、便血、频繁呕吐或精神差，应尽快就医。",
+      reassure: "若精神食欲良好且尿量正常，通常可先观察并持续记录。",
     },
     possible_causes: [],
     interpretation: {
@@ -526,9 +531,7 @@ function normalizeV2(
     out.risk_level = "unknown";
   }
 
-  out.stool_features = out.is_stool_image === false
-    ? null
-    : {
+  out.stool_features = {
     shape:
       typeof stool.shape === "string" && stool.shape.trim()
         ? stool.shape.trim()
@@ -592,6 +595,22 @@ function normalizeV2(
       ? stool.visible_findings.map(String)
       : [],
   };
+  if (out.is_stool_image === false) {
+    if (!out.stool_features.shape_desc || out.stool_features.shape_desc === "unknown") {
+      out.stool_features.shape_desc = "未识别为大便或目标不清晰";
+    }
+    if (!out.stool_features.color_desc || out.stool_features.color_desc === "unknown") {
+      out.stool_features.color_desc = "颜色无法判断（需更清晰图片）";
+    }
+    if (!out.stool_features.texture_desc || out.stool_features.texture_desc === "unknown") {
+      out.stool_features.texture_desc = "质地无法判断（需更清晰图片）";
+    }
+    out.stool_features.visible_findings = ensureMinItems(
+      out.stool_features.visible_findings,
+      1,
+      ["not_stool_image"]
+    );
+  }
   if (out.stool_features) {
     out.stool_features.visible_findings = ensureMinItems(
       out.stool_features.visible_findings,
@@ -610,54 +629,104 @@ function normalizeV2(
     ["未见明显异常"]
   );
 
-  out.doctor_explanation = out.is_stool_image === false
-    ? null
-    : {
-        one_sentence_conclusion:
-          typeof doctor.one_sentence_conclusion === "string" && doctor.one_sentence_conclusion.trim()
-            ? doctor.one_sentence_conclusion.trim()
-            : out.headline || base.doctor_explanation.one_sentence_conclusion,
-        shape:
-          typeof doctor.shape === "string" && doctor.shape.trim()
-            ? doctor.shape.trim()
-            : "",
-        color:
-          typeof doctor.color === "string" && doctor.color.trim()
-            ? doctor.color.trim()
-            : "",
-        texture:
-          typeof doctor.texture === "string" && doctor.texture.trim()
-            ? doctor.texture.trim()
-            : "",
-        visual_analysis: {
-          shape:
-            typeof doctor.visual_analysis?.shape === "string" && doctor.visual_analysis.shape.trim()
-              ? doctor.visual_analysis.shape.trim()
-              : "",
-          color:
-            typeof doctor.visual_analysis?.color === "string" && doctor.visual_analysis.color.trim()
-              ? doctor.visual_analysis.color.trim()
-              : "",
-          texture:
-            typeof doctor.visual_analysis?.texture === "string" && doctor.visual_analysis.texture.trim()
-              ? doctor.visual_analysis.texture.trim()
-              : "",
-        },
-        combined_judgement:
-          typeof doctor.combined_judgement === "string" && doctor.combined_judgement.trim()
-            ? doctor.combined_judgement.trim()
-            : interpretation.overall_judgement || base.interpretation.overall_judgement,
-      };
+  out.doctor_explanation = {
+    one_sentence_conclusion:
+      typeof doctor.one_sentence_conclusion === "string" && doctor.one_sentence_conclusion.trim()
+        ? doctor.one_sentence_conclusion.trim()
+        : out.headline || base.doctor_explanation.one_sentence_conclusion,
+    shape:
+      typeof doctor.shape === "string" && doctor.shape.trim()
+        ? doctor.shape.trim()
+        : "",
+    color:
+      typeof doctor.color === "string" && doctor.color.trim()
+        ? doctor.color.trim()
+        : "",
+    texture:
+      typeof doctor.texture === "string" && doctor.texture.trim()
+        ? doctor.texture.trim()
+        : "",
+    visual_analysis: {
+      shape:
+        typeof doctor.visual_analysis?.shape === "string" && doctor.visual_analysis.shape.trim()
+          ? doctor.visual_analysis.shape.trim()
+          : "",
+      color:
+        typeof doctor.visual_analysis?.color === "string" && doctor.visual_analysis.color.trim()
+          ? doctor.visual_analysis.color.trim()
+          : "",
+      texture:
+        typeof doctor.visual_analysis?.texture === "string" && doctor.visual_analysis.texture.trim()
+          ? doctor.visual_analysis.texture.trim()
+          : "",
+    },
+    combined_judgement:
+      typeof doctor.combined_judgement === "string" && doctor.combined_judgement.trim()
+        ? doctor.combined_judgement.trim()
+        : interpretation.overall_judgement || base.interpretation.overall_judgement,
+    causes:
+      typeof doctor.causes === "string" && doctor.causes.trim()
+        ? doctor.causes.trim()
+        : base.doctor_explanation.causes,
+    todo:
+      typeof doctor.todo === "string" && doctor.todo.trim()
+        ? doctor.todo.trim()
+        : base.doctor_explanation.todo,
+    red_flags:
+      typeof doctor.red_flags === "string" && doctor.red_flags.trim()
+        ? doctor.red_flags.trim()
+        : base.doctor_explanation.red_flags,
+    reassure:
+      typeof doctor.reassure === "string" && doctor.reassure.trim()
+        ? doctor.reassure.trim()
+        : base.doctor_explanation.reassure,
+  };
 
   if (out.doctor_explanation) {
-    if (!out.doctor_explanation.shape && out.doctor_explanation.visual_analysis?.shape) {
-      out.doctor_explanation.shape = out.doctor_explanation.visual_analysis.shape;
+    const fallbackShape =
+      out.is_stool_image === false
+        ? "未识别为大便或画面不清晰，建议重新拍摄并让目标居中。"
+        : "形态信息不足，建议补拍清晰图片。";
+    const fallbackColor =
+      out.is_stool_image === false
+        ? "颜色无法可靠判断，建议在充足光线下补拍。"
+        : "颜色信息不足，建议补拍清晰图片。";
+    const fallbackTexture =
+      out.is_stool_image === false
+        ? "质地细节不清晰，建议靠近并对焦。"
+        : "质地信息不足，建议补拍清晰图片。";
+    if (!out.doctor_explanation.shape) out.doctor_explanation.shape = fallbackShape;
+    if (!out.doctor_explanation.color) out.doctor_explanation.color = fallbackColor;
+    if (!out.doctor_explanation.texture) out.doctor_explanation.texture = fallbackTexture;
+    if (!out.doctor_explanation.visual_analysis?.shape) {
+      out.doctor_explanation.visual_analysis.shape = out.doctor_explanation.shape;
     }
-    if (!out.doctor_explanation.color && out.doctor_explanation.visual_analysis?.color) {
-      out.doctor_explanation.color = out.doctor_explanation.visual_analysis.color;
+    if (!out.doctor_explanation.visual_analysis?.color) {
+      out.doctor_explanation.visual_analysis.color = out.doctor_explanation.color;
     }
-    if (!out.doctor_explanation.texture && out.doctor_explanation.visual_analysis?.texture) {
-      out.doctor_explanation.texture = out.doctor_explanation.visual_analysis.texture;
+    if (!out.doctor_explanation.visual_analysis?.texture) {
+      out.doctor_explanation.visual_analysis.texture = out.doctor_explanation.texture;
+    }
+    if (!out.doctor_explanation.combined_judgement) {
+      out.doctor_explanation.combined_judgement = out.ok
+        ? base.interpretation.overall_judgement
+        : "信息不足，建议补充清晰图片与情况说明。";
+    }
+    if (!out.doctor_explanation.causes) {
+      out.doctor_explanation.causes =
+        "可能与饮食结构、肠道蠕动或短期受凉有关，需结合补充信息判断。";
+    }
+    if (!out.doctor_explanation.todo) {
+      out.doctor_explanation.todo =
+        "建议补拍清晰图片并记录 24-48 小时变化，必要时咨询医生。";
+    }
+    if (!out.doctor_explanation.red_flags) {
+      out.doctor_explanation.red_flags =
+        "若出现发热、便血、频繁呕吐或精神明显差，应尽快就医。";
+    }
+    if (!out.doctor_explanation.reassure) {
+      out.doctor_explanation.reassure =
+        "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
   }
 
@@ -766,7 +835,7 @@ function normalizeV2(
     : [];
 
   out.ui_strings = {
-    summary: typeof ui.summary === "string" ? ui.summary : out.summary,
+    summary: typeof ui.summary === "string" && ui.summary.trim() ? ui.summary : out.summary,
     tags: Array.isArray(ui.tags) ? ui.tags.map(String) : [],
     sections: normalizedSections,
     longform: {
@@ -859,6 +928,12 @@ function normalizeV2(
       ]
     : sections;
 
+  out.ui_strings.tags = ensureMinItems(
+    out.ui_strings.tags,
+    1,
+    ["需观察"]
+  );
+
   if (!out.headline) {
     out.headline = out.ok ? "整体风险偏低，建议继续观察" : "分析不确定，建议补充信息";
   }
@@ -891,13 +966,13 @@ function normalizeV2(
     base.interpretation.how_context_affects
   );
 
+  const howToReadFallback =
+    out.is_stool_image === false
+      ? "图片未识别为大便，建议重新拍摄（光线充足、对焦清晰、目标占画面 50% 以上）。"
+      : `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`;
   out.ui_strings.longform = {
     conclusion: out.ui_strings.longform.conclusion || out.headline || "整体情况需要继续观察。",
-    how_to_read:
-      out.ui_strings.longform.how_to_read ||
-      out.stool_features
-        ? `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`
-        : "图片无法识别为大便，建议重新拍摄。",
+    how_to_read: out.ui_strings.longform.how_to_read || howToReadFallback,
     context:
       out.ui_strings.longform.context ||
       out.interpretation.how_context_affects.join("；"),
@@ -1051,9 +1126,40 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
-    if (url.pathname === "/ping" && request.method === "GET") {
+        if (url.pathname === "/ping" && request.method === "GET") {
       return json({ ok: true, schema_version: SCHEMA_VERSION, worker_version: workerVersion });
     }
+
+        if (url.pathname === "/proxy_ping" && request.method === "GET") {
+          const proxyBase =
+            env.OPENAI_PROXY_BASE_URL ||
+            env.OPENAI_PROXY_URL ||
+            "https://stool-ai-app.onrender.com";
+          const proxyPingUrl = proxyBase.replace(/\/+$/, "") + "/ping";
+          let proxyPing: unknown = null;
+          let proxyStatus = 0;
+          try {
+            const resp = await fetch(proxyPingUrl, { method: "GET" });
+            proxyStatus = resp.status;
+            const text = await resp.text();
+            try {
+              proxyPing = JSON.parse(text);
+            } catch {
+              proxyPing = { raw: text };
+            }
+          } catch (err) {
+            proxyPing = { error: String(err?.message || err) };
+          }
+          return json({
+            ok: true,
+            proxy_base_url: proxyBase,
+            proxy_ping_url: proxyPingUrl,
+            proxy_status: proxyStatus,
+            proxy_ping: proxyPing,
+            worker_version: workerVersion,
+            schema_version: SCHEMA_VERSION,
+          });
+        }
 
     if (url.pathname === "/version" && request.method === "GET") {
       return json({
@@ -1069,6 +1175,7 @@ export default {
       const baseHeaders = {
         "x-proxy-version": "unknown",
         "x-openai-model": "unknown",
+        "x-build-id": "unknown",
       };
       let context: Record<string, unknown> = {};
       try {
@@ -1076,8 +1183,9 @@ export default {
         console.log("[ANALYZE] content-type=" + ct);
         if (!ct.includes("application/json")) {
           const invalid = buildInvalidImageResult(workerVersion, rayId);
-          invalid.input_echo = { context: {} };
-          return json(invalid, 422, baseHeaders);
+          const normalized = normalizeV2(invalid, workerVersion);
+          normalized.input_echo = { context: {} };
+          return json(normalized, 422, baseHeaders);
         }
 
         const raw = await request.text();
@@ -1117,19 +1225,24 @@ export default {
         if (!image || image.trim().length < 10 || image.trim() === "test") {
           console.log("[ANALYZE] missing image keys", Object.keys(body));
           const invalid = buildInvalidImageResult(workerVersion, rayId);
-          invalid.input_echo = { context };
-          return json(invalid, 422, baseHeaders);
+          const normalized = normalizeV2(invalid, workerVersion);
+          normalized.input_echo = { context };
+          return json(normalized, 422, baseHeaders);
         }
 
         const imageBytes = decodeBase64Image(image);
         const dims = imageBytes ? getImageDimensions(imageBytes) : null;
         if (!imageBytes || !dims || dims.width < 512 || dims.height < 512) {
           const invalid = buildInvalidImageResult(workerVersion, rayId);
-          invalid.input_echo = { context };
-          return json(invalid, 422, baseHeaders);
+          const normalized = normalizeV2(invalid, workerVersion);
+          normalized.input_echo = { context };
+          return json(normalized, 422, baseHeaders);
         }
 
-        const proxyUrl = env.OPENAI_PROXY_URL;
+        const proxyUrl =
+          env.OPENAI_PROXY_BASE_URL ||
+          env.OPENAI_PROXY_URL ||
+          "https://stool-ai-app.onrender.com";
         if (proxyUrl) {
           const proxy = proxyUrl.replace(/\/+$/, "") + "/analyze";
           console.log("[PROXY] enabled host=" + new URL(proxyUrl).host);
@@ -1144,14 +1257,22 @@ export default {
             proxyResp.headers.get("x-proxy-version") ||
             proxyResp.headers.get("x-proxy-version".toLowerCase()) ||
             "unknown";
-      const proxyModel =
-        proxyResp.headers.get("x-openai-model") ||
-        proxyResp.headers.get("x-openai-model".toLowerCase()) ||
-        "";
-      const proxyHeaders = {
-        "x-proxy-version": proxyVersion,
-        "x-openai-model": proxyModel || "unknown",
-      };
+          const proxyModel =
+            proxyResp.headers.get("x-openai-model") ||
+            proxyResp.headers.get("x-openai-model".toLowerCase()) ||
+            "";
+          const proxyBuildId =
+            proxyResp.headers.get("x-build-id") ||
+            proxyResp.headers.get("x-build-id".toLowerCase()) ||
+            "unknown";
+          const proxyHeaders = {
+            "x-proxy-version": proxyVersion,
+            "x-openai-model": proxyModel || "unknown",
+            "x-build-id": proxyBuildId,
+          };
+          console.log(
+            `[PROXY] headers x-proxy-version=${proxyVersion} x-openai-model=${proxyModel || "unknown"} x-build-id=${proxyBuildId}`
+          );
           const ms = Date.now() - start;
           console.log("[OPENAI] done");
           console.log("[OPENAI] ms=" + ms);
@@ -1159,9 +1280,6 @@ export default {
           if (!proxyResp.ok) {
             console.log(
               `[PROXY] status=${proxyResp.status} content-type=${proxyResp.headers.get("content-type") || ""}`
-            );
-            console.log(
-              `[PROXY] headers x-proxy-version=${proxyVersion} x-openai-model=${proxyModel || "unknown"}`
             );
             console.log(`[PROXY] body preview=${text.slice(0, 200)}`);
           }
@@ -1191,8 +1309,9 @@ export default {
               text || `proxy status ${proxyResp.status}`,
               rayId
             );
-            (err as any).input_echo = { context };
-            return json(err, 200, proxyHeaders);
+            const normalized = normalizeV2(err, workerVersion, proxyVersion, modelUsed);
+            normalized.input_echo = { context };
+            return json(normalized, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
             data = upgradeLegacyResult(data);

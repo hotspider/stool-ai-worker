@@ -10,7 +10,8 @@
     }
   ],
   "vars": {
-    "WORKER_VERSION": "1d9ffc6"
+    "WORKER_VERSION": "1d9ffc6",
+    "OPENAI_PROXY_BASE_URL": "https://stool-ai-app.onrender.com"
   }
   // Optional: set OPENAI_PROXY_URL via environment variables or secrets.
   // Example (secret): npx wrangler secret put OPENAI_PROXY_URL
