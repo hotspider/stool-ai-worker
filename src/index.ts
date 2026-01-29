@@ -198,10 +198,10 @@ function buildDefaultResult() {
       how_context_affects: ["未提供补充信息，无法判断饮食与症状关联", "若近期有发热/腹痛需提高警惕", "若精神食欲正常则更偏功能性变化"],
       confidence_explain: "缺少完整补充信息，置信度有限。",
     },
-    context_summary: "",
+    context_summary: "未提供补充信息，仅基于图片判断。",
     analysis_basis: {
-      image_only: [],
-      combined_reasoning: [],
+      image_only: DEFAULT_IMAGE_ONLY,
+      combined_reasoning: DEFAULT_COMBINED_REASONING,
     },
     input_echo: {
       context: {},
