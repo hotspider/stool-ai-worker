@@ -28,12 +28,39 @@ head -c 400 "$RESP_BODY" || true
 echo ""
 echo ""
 echo "=== Response JSON (key fields) ==="
-if command -v jq >/dev/null 2>&1; then
-  jq '{ok, error_code, error, message, is_stool_image, confidence, model_used, proxy_version, worker_version, stool_confidence, stool_scene, stool_form_hint}' "$RESP_BODY" || cat "$RESP_BODY"
-else
-  echo "jq 未安装，打印原文："
-  cat "$RESP_BODY"
-fi
+python3 - "$RESP_BODY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+if not path or not path.exists():
+    print("JSON 解析失败：未提供响应文件路径")
+    sys.exit(0)
+raw = path.read_text(encoding="utf-8", errors="ignore")
+try:
+    data = json.loads(raw)
+    keys = [
+        "ok",
+        "error",
+        "error_code",
+        "message",
+        "is_stool_image",
+        "confidence",
+        "model_used",
+        "proxy_version",
+        "worker_version",
+        "stool_confidence",
+        "stool_scene",
+        "stool_form_hint",
+    ]
+    out = {k: data.get(k) for k in keys}
+    print(out)
+except Exception as e:
+    print(f"JSON 解析失败：{e}")
+    print("原始响应（前 400 字符）：")
+    print(raw[:400])
+PY
 
 echo ""
 echo "请在另一个终端执行："

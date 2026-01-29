@@ -516,7 +516,7 @@ function contextAffectsFromInput(ctx: Record<string, unknown>) {
 }
 
 function applyNonStoolOverrides(out: any, contextAffects: string[]) {
-  out.stool_features = null;
+  out.stool_features = {};
   out.possible_causes = [];
   out.reasoning_bullets = [];
   out.actions_today = { diet: [], hydration: [], care: [], avoid: [], observe: [] };
@@ -588,18 +588,6 @@ function applyNonStoolOverrides(out: any, contextAffects: string[]) {
   return out;
 }
 
-function isUpstreamError(out: any) {
-  const code = String(out?.error_code || out?.error || "").toUpperCase();
-  return (
-    code.includes("PROXY_ERROR") ||
-    code.includes("UPSTREAM_INVALID_JSON") ||
-    code.includes("INVALID_JSON") ||
-    code.includes("OPENAI_ERROR") ||
-    code.includes("PROXY_EXCEPTION") ||
-    code.includes("PROXY_NORMALIZE_CRASH")
-  );
-}
-
 function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: string[]) {
   const conf = Number.isFinite(Number(out.stool_confidence))
     ? Number(out.stool_confidence)
@@ -610,26 +598,9 @@ function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: 
     return { out, applied: false, proceed: out.is_stool_image === true };
   }
   const lowFloor = userConfirmed ? 0.18 : 0.25;
-  const proceed = conf >= 0.45 || conf >= lowFloor;
   const lowConf = conf >= lowFloor && conf < 0.45;
 
-  if (!proceed) {
-    out.ok = false;
-    out.is_stool_image = false;
-    out.error_code = "NOT_STOOL_IMAGE";
-    out.error = "NOT_STOOL_IMAGE";
-    out.headline = out.headline || "这张图片未识别到大便，暂时无法分析";
-    out.confidence = Math.min(out.confidence || 0, conf || 0);
-    out.uncertainty_note = "图片未识别为大便，建议更清晰的近距离重拍。";
-    out = applyNonStoolOverrides(out, contextAffects);
-    return { out, applied: true, proceed: false, lowConf: false, conf };
-  }
-
-  out.ok = true;
-  out.is_stool_image = true;
-  out.error_code = undefined;
-  out.error = undefined;
-  if (lowConf) {
+  if (lowConf && out.is_stool_image === true) {
     out.confidence = Math.min(0.4, out.confidence || 1, conf);
     out.uncertainty_note =
       "识别不确定（可能为糊状/尿不湿场景），仍提供参考分析，建议补拍清晰近距图片。";
@@ -642,7 +613,7 @@ function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: 
       stool_form_hint: out.stool_form_hint || "unknown",
     };
   }
-  return { out, applied: true, proceed: true, lowConf, conf };
+  return { out, applied: true, proceed: out.is_stool_image === true, lowConf, conf };
 }
 
 function truncateLogText(value: unknown, limit = 200) {
@@ -654,7 +625,7 @@ function truncateLogText(value: unknown, limit = 200) {
 function logDetect(
   out: any,
   requestId: string,
-  decision: "block_not_stool" | "block_upstream_error" | "proceed_analysis"
+  decision: "block_not_stool" | "proceed_analysis"
 ) {
   const validation = out?.image_validation || {};
   const reason = truncateLogText(out?.not_stool_reason, 200);
@@ -705,7 +676,8 @@ function normalizeV2(
   const longform = { ...base.ui_strings.longform, ...(ui.longform || {}) };
 
   out.ok = out.ok === false ? false : true;
-  out.is_stool_image = out.is_stool_image === false ? false : true;
+  const hasStoolFlag = parsed && typeof parsed === "object" && "is_stool_image" in (parsed as any);
+  out.is_stool_image = hasStoolFlag ? out.is_stool_image === true : false;
   out.schema_version = SCHEMA_VERSION;
   out.worker_version = out.worker_version || workerVersion;
   out.proxy_version = proxyVersion || out.proxy_version || "unknown";
@@ -773,100 +745,99 @@ function normalizeV2(
     out.risk_level = "unknown";
   }
 
-  out.stool_features = out.is_stool_image === false
-    ? null
-    : {
+  const stoolSource =
+    out.stool_features && typeof out.stool_features === "object" ? out.stool_features : {};
+  out.stool_features = {
     shape:
-      typeof stool.shape === "string" && stool.shape.trim()
-        ? stool.shape.trim()
+      typeof (stoolSource as any).shape === "string" && String((stoolSource as any).shape).trim()
+        ? String((stoolSource as any).shape).trim()
         : base.stool_features.shape,
     bristol_type:
-      stool.bristol_type === null
+      (stoolSource as any).bristol_type === null
         ? null
-        : Number.isFinite(Number(stool.bristol_type))
-            ? Number(stool.bristol_type)
+        : Number.isFinite(Number((stoolSource as any).bristol_type))
+            ? Number((stoolSource as any).bristol_type)
             : null,
     bristol_range:
-      typeof stool.bristol_range === "string" && stool.bristol_range.trim()
-        ? stool.bristol_range.trim()
+      typeof (stoolSource as any).bristol_range === "string" &&
+      String((stoolSource as any).bristol_range).trim()
+        ? String((stoolSource as any).bristol_range).trim()
         : base.stool_features.bristol_range,
     shape_desc:
-      typeof stool.shape_desc === "string" && stool.shape_desc.trim()
-        ? stool.shape_desc.trim()
-        : base.stool_features.shape_desc,
+      typeof (stoolSource as any).shape_desc === "string" &&
+      String((stoolSource as any).shape_desc).trim()
+        ? String((stoolSource as any).shape_desc).trim()
+        : "",
     color:
-      typeof stool.color === "string" && stool.color.trim()
-        ? stool.color.trim()
+      typeof (stoolSource as any).color === "string" && String((stoolSource as any).color).trim()
+        ? String((stoolSource as any).color).trim()
         : base.stool_features.color,
     color_desc:
-      typeof stool.color_desc === "string" && stool.color_desc.trim()
-        ? stool.color_desc.trim()
-        : base.stool_features.color_desc,
+      typeof (stoolSource as any).color_desc === "string" &&
+      String((stoolSource as any).color_desc).trim()
+        ? String((stoolSource as any).color_desc).trim()
+        : "",
     color_reason:
-      typeof stool.color_reason === "string" && stool.color_reason.trim()
-        ? stool.color_reason.trim()
+      typeof (stoolSource as any).color_reason === "string" &&
+      String((stoolSource as any).color_reason).trim()
+        ? String((stoolSource as any).color_reason).trim()
         : base.stool_features.color_reason,
     texture:
-      typeof stool.texture === "string" && stool.texture.trim()
-        ? stool.texture.trim()
+      typeof (stoolSource as any).texture === "string" && String((stoolSource as any).texture).trim()
+        ? String((stoolSource as any).texture).trim()
         : base.stool_features.texture,
     texture_desc:
-      typeof stool.texture_desc === "string" && stool.texture_desc.trim()
-        ? stool.texture_desc.trim()
-        : base.stool_features.texture_desc,
-    abnormal_signs: Array.isArray(stool.abnormal_signs)
-      ? stool.abnormal_signs.map(String)
+      typeof (stoolSource as any).texture_desc === "string" &&
+      String((stoolSource as any).texture_desc).trim()
+        ? String((stoolSource as any).texture_desc).trim()
+        : "",
+    abnormal_signs: Array.isArray((stoolSource as any).abnormal_signs)
+      ? (stoolSource as any).abnormal_signs.map(String)
       : [],
-    volume: ["small", "medium", "large", "unknown"].includes(stool.volume)
-      ? stool.volume
+    volume: ["small", "medium", "large", "unknown"].includes((stoolSource as any).volume)
+      ? (stoolSource as any).volume
       : "unknown",
-    wateriness: ["none", "mild", "moderate", "severe"].includes(stool.wateriness)
-      ? stool.wateriness
+    wateriness: ["none", "mild", "moderate", "severe"].includes((stoolSource as any).wateriness)
+      ? (stoolSource as any).wateriness
       : "none",
-    mucus: ["none", "suspected", "present"].includes(stool.mucus) ? stool.mucus : "none",
-    foam: ["none", "suspected", "present"].includes(stool.foam) ? stool.foam : "none",
-    blood: ["none", "suspected", "present"].includes(stool.blood) ? stool.blood : "none",
-    undigested_food: ["none", "suspected", "present"].includes(stool.undigested_food)
-      ? stool.undigested_food
+    mucus: ["none", "suspected", "present"].includes((stoolSource as any).mucus)
+      ? (stoolSource as any).mucus
       : "none",
-    separation_layers: ["none", "suspected", "present"].includes(stool.separation_layers)
-      ? stool.separation_layers
+    foam: ["none", "suspected", "present"].includes((stoolSource as any).foam)
+      ? (stoolSource as any).foam
       : "none",
-    odor_level: ["normal", "strong", "very_strong", "unknown"].includes(stool.odor_level)
-      ? stool.odor_level
+    blood: ["none", "suspected", "present"].includes((stoolSource as any).blood)
+      ? (stoolSource as any).blood
+      : "none",
+    undigested_food: ["none", "suspected", "present"].includes(
+      (stoolSource as any).undigested_food
+    )
+      ? (stoolSource as any).undigested_food
+      : "none",
+    separation_layers: ["none", "suspected", "present"].includes(
+      (stoolSource as any).separation_layers
+    )
+      ? (stoolSource as any).separation_layers
+      : "none",
+    odor_level: ["normal", "strong", "very_strong", "unknown"].includes(
+      (stoolSource as any).odor_level
+    )
+      ? (stoolSource as any).odor_level
       : "unknown",
-    visible_findings: Array.isArray(stool.visible_findings)
-      ? stool.visible_findings.map(String)
+    visible_findings: Array.isArray((stoolSource as any).visible_findings)
+      ? (stoolSource as any).visible_findings.map(String)
       : [],
   };
-  if (out.is_stool_image === false) {
-    if (!out.stool_features.shape_desc || out.stool_features.shape_desc === "unknown") {
-      out.stool_features.shape_desc = "未识别为大便或目标不清晰";
-    }
-    if (!out.stool_features.color_desc || out.stool_features.color_desc === "unknown") {
-      out.stool_features.color_desc = "颜色无法判断（需更清晰图片）";
-    }
-    if (!out.stool_features.texture_desc || out.stool_features.texture_desc === "unknown") {
-      out.stool_features.texture_desc = "质地无法判断（需更清晰图片）";
-    }
-    out.stool_features.visible_findings = ensureMinItems(
-      out.stool_features.visible_findings,
-      1,
-      ["not_stool_image"]
-    );
-  }
-  if (out.stool_features) {
-    out.stool_features.visible_findings = ensureMinItems(
-      out.stool_features.visible_findings,
-      1,
-      ["none"]
-    );
-    out.stool_features.abnormal_signs = ensureMinItems(
-      out.stool_features.abnormal_signs,
-      1,
-      ["未见明显异常"]
-    );
-  }
+  out.stool_features.visible_findings = ensureMinItems(
+    out.stool_features.visible_findings,
+    1,
+    ["none"]
+  );
+  out.stool_features.abnormal_signs = ensureMinItems(
+    out.stool_features.abnormal_signs,
+    1,
+    ["未见明显异常"]
+  );
 
   out.doctor_explanation = {
     one_sentence_conclusion:
@@ -968,7 +939,7 @@ function normalizeV2(
         "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
   }
-  if (out.is_stool_image === false && !isUpstreamError(out)) {
+  if (out.is_stool_image === false) {
     return applyNonStoolOverrides(out, contextAffects);
   }
 
@@ -1218,7 +1189,7 @@ function normalizeV2(
   const howToReadFallback =
     out.is_stool_image === false
       ? "图片未识别为大便，建议重新拍摄（光线充足、对焦清晰、目标占画面 50% 以上）。"
-      : `形态：${out.stool_features.shape_desc}；颜色：${out.stool_features.color_desc}；质地：${out.stool_features.texture_desc}。`;
+      : `形态：${out.stool_features?.shape_desc ?? ""}；颜色：${out.stool_features?.color_desc ?? ""}；质地：${out.stool_features?.texture_desc ?? ""}。`;
   out.ui_strings.longform = {
     conclusion: out.ui_strings.longform.conclusion || out.headline || "整体情况需要继续观察。",
     how_to_read: out.ui_strings.longform.how_to_read || howToReadFallback,
@@ -1346,7 +1317,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     void ctx;
     const url = new URL(request.url);
-    console.log("[WORKER] request", request.method, url.pathname);
+    console.log(`[RID:na] [WORKER] request ${request.method} ${url.pathname}`);
     const origin = request.headers.get("Origin") || undefined;
 
     const workerVersion = env.WORKER_VERSION ?? "dev";
@@ -1440,7 +1411,11 @@ export default {
           const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context: {} };
-          logDetect(normalized, requestId, "block_not_stool");
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           return json(normalized, 422, baseHeaders);
         }
 
@@ -1487,7 +1462,11 @@ export default {
           const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context };
-          logDetect(normalized, requestId, "block_not_stool");
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           return json(normalized, 422, baseHeaders);
         }
 
@@ -1497,7 +1476,11 @@ export default {
           const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context };
-          logDetect(normalized, requestId, "block_not_stool");
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           return json(normalized, 422, baseHeaders);
         }
 
@@ -1562,27 +1545,23 @@ export default {
                 proxyVersion,
                 modelUsed
               );
-              let decisionLabel: "block_not_stool" | "block_upstream_error" | "proceed_analysis" =
-                "proceed_analysis";
-              if (isUpstreamError(normalized)) {
-                normalized.is_stool_image = null as any;
-                decisionLabel = "block_upstream_error";
-              } else {
-                const decision = applyDetectionPolicy(
-                  normalized,
-                  userConfirmedStool,
-                  contextAffectsFromInput(context)
+              const decision = applyDetectionPolicy(
+                normalized,
+                userConfirmedStool,
+                contextAffectsFromInput(context)
+              );
+              normalized = decision.out;
+              if (decision.applied) {
+                console.log(
+                  `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${normalized.is_stool_image === true} ${decision.lowConf ? "(low_conf_mode)" : ""}`
                 );
-                normalized = decision.out;
-                if (decision.applied) {
-                  console.log(
-                    `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
-                  );
-                  decisionLabel = decision.proceed ? "proceed_analysis" : "block_not_stool";
-                }
               }
               normalized.input_echo = { context };
-              logDetect(normalized, requestId, decisionLabel);
+              logDetect(
+                normalized,
+                requestId,
+                normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+              );
               return json(normalized, 200, proxyHeaders);
             }
             const err = buildProxyErrorResult(
@@ -1594,7 +1573,11 @@ export default {
             );
             const normalized = normalizeV2(err, workerVersion, proxyVersion, modelUsed);
             normalized.input_echo = { context };
-            logDetect(normalized, requestId, "block_not_stool");
+            logDetect(
+              normalized,
+              requestId,
+              normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+            );
             return json(normalized, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
@@ -1610,32 +1593,28 @@ export default {
             proxyVersion,
             modelUsed
           );
-          let decisionLabel: "block_not_stool" | "block_upstream_error" | "proceed_analysis" =
-            "proceed_analysis";
-          if (isUpstreamError(normalized)) {
-            normalized.is_stool_image = null as any;
-            decisionLabel = "block_upstream_error";
-          } else {
-            const decision = applyDetectionPolicy(
-              normalized,
-              userConfirmedStool,
-              contextAffectsFromInput(context)
+          const decision = applyDetectionPolicy(
+            normalized,
+            userConfirmedStool,
+            contextAffectsFromInput(context)
+          );
+          normalized = decision.out;
+          if (decision.applied) {
+            console.log(
+              `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${normalized.is_stool_image === true} ${decision.lowConf ? "(low_conf_mode)" : ""}`
             );
-            normalized = decision.out;
-            if (decision.applied) {
-              console.log(
-                `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
-              );
-              decisionLabel = decision.proceed ? "proceed_analysis" : "block_not_stool";
-            }
           }
           normalized.input_echo = { context };
-          logDetect(normalized, requestId, decisionLabel);
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
             if (guardFlag === false) {
               console.log(
-                `[GUARD] is_stool_image=false confidence=${(normalized as any).confidence ?? ""} reason=${(normalized as any).explanation ?? ""}`
+                `[RID:${requestId}] [GUARD] is_stool_image=false confidence=${(normalized as any).confidence ?? ""} reason=${(normalized as any).explanation ?? ""}`
               );
             }
           }
@@ -1652,11 +1631,15 @@ export default {
             workerVersion
           );
           normalized.input_echo = { context };
-            logDetect(normalized, requestId, "block_not_stool");
+            logDetect(
+              normalized,
+              requestId,
+              normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+            );
           return json(normalized, 200, baseHeaders);
         }
 
-        console.log("[OPENAI] start");
+        console.log(`[RID:${requestId}] [OPENAI] start`);
         const start = Date.now();
         const directModel = "gpt-5.2";
         const resp = await fetch("https://api.openai.com/v1/responses", {
@@ -1686,8 +1669,8 @@ export default {
           }),
         });
         const ms = Date.now() - start;
-        console.log("[OPENAI] done");
-        console.log("[OPENAI] ms=" + ms);
+        console.log(`[RID:${requestId}] [OPENAI] done`);
+        console.log(`[RID:${requestId}] [OPENAI] ms=${ms}`);
 
         if (!resp.ok) {
           const text = await resp.text().catch(() => "");
@@ -1703,7 +1686,11 @@ export default {
             directModel
           );
           normalized.input_echo = { context };
-          logDetect(normalized, requestId, "block_not_stool");
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1717,7 +1704,11 @@ export default {
             directModel
           );
           normalized.input_echo = { context };
-        logDetect(normalized, requestId, "block_not_stool");
+        logDetect(
+          normalized,
+          requestId,
+          normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+        );
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let parsed: any = {};
@@ -1731,7 +1722,11 @@ export default {
             directModel
           );
           normalized.input_echo = { context };
-          logDetect(normalized, requestId, "block_not_stool");
+          logDetect(
+            normalized,
+            requestId,
+            normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+          );
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         const normalized = normalizeV2(parsed, workerVersion, undefined, directModel);
@@ -1739,9 +1734,9 @@ export default {
         logDetect(normalized, requestId, normalized.is_stool_image === false ? "block_not_stool" : "proceed_analysis");
         return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
       } catch (error: any) {
-        console.log("[OPENAI] catch");
-        console.error("[OPENAI] error", error);
-        console.error("[OPENAI] stack", error?.stack ?? "no stack");
+        console.log(`[RID:${requestId}] [OPENAI] catch`);
+        console.error(`[RID:${requestId}] [OPENAI] error`, error);
+        console.error(`[RID:${requestId}] [OPENAI] stack`, error?.stack ?? "no stack");
         const normalized = normalizeV2(
           { ok: false, error: "OPENAI_ERROR", message: "analyze failed", rayId },
           workerVersion,
@@ -1749,7 +1744,11 @@ export default {
           "unknown"
         );
         normalized.input_echo = { context: {} };
-        logDetect(normalized, requestId, "block_not_stool");
+        logDetect(
+          normalized,
+          requestId,
+          normalized.is_stool_image === true ? "proceed_analysis" : "block_not_stool"
+        );
         return json(normalized, 200, baseHeaders);
       }
     }
