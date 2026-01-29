@@ -466,6 +466,7 @@ function normalizeV2(
   out.proxy_version = proxyVersion || out.proxy_version || "unknown";
   out.model_used = modelUsed || out.model_used || "unknown";
   out.context_input = out.context_input && typeof out.context_input === "object" ? out.context_input : undefined;
+  out.input_context = out.input_context && typeof out.input_context === "object" ? out.input_context : out.context_input;
 
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
   out.confidence = Number.isFinite(Number(out.confidence))
