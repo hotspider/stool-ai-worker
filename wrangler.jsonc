@@ -10,7 +10,7 @@
     }
   ],
   "vars": {
-    "WORKER_VERSION": "4127f7b"
+    "WORKER_VERSION": "0f6761f"
   }
   // Optional: set OPENAI_PROXY_URL via environment variables or secrets.
   // Example (secret): npx wrangler secret put OPENAI_PROXY_URL
