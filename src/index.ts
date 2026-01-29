@@ -633,6 +633,44 @@ function applyDetectionPolicy(out: any, userConfirmed: boolean, contextAffects: 
   return { out, applied: true, proceed: true, lowConf, conf };
 }
 
+function truncateLogText(value: unknown, limit = 200) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function logDetect(out: any, requestId: string, decision: "block_not_stool" | "proceed_analysis") {
+  const validation = out?.image_validation || {};
+  const reason = truncateLogText(out?.not_stool_reason, 200);
+  const valReason = truncateLogText(validation?.reason, 200);
+  console.log(
+    `[RID:${requestId}] [DETECT] is_stool_image=${String(out?.is_stool_image)} ` +
+      `stool_confidence=${String(out?.stool_confidence ?? "unknown")} ` +
+      `stool_scene=${String(out?.stool_scene ?? "unknown")} ` +
+      `stool_form_hint=${String(out?.stool_form_hint ?? "unknown")} ` +
+      `not_stool_reason=${reason} ` +
+      `used_fallback=${String(out?.used_fallback ?? false)} ` +
+      `model_used=${String(out?.model_used ?? "unknown")} ` +
+      `proxy_version=${String(out?.proxy_version ?? "unknown")} ` +
+      `worker_version=${String(out?.worker_version ?? "unknown")} ` +
+      `image_validation.status=${String(validation?.status ?? "")} ` +
+      `image_validation.reason=${valReason}`
+  );
+  console.log(`[RID:${requestId}] [DETECT_DECISION] ${decision}`);
+  if (
+    out?.stool_confidence === undefined &&
+    validation &&
+    typeof validation === "object" &&
+    ("stool_confidence" in validation || "stool_scene" in validation || "stool_form_hint" in validation)
+  ) {
+    console.log(
+      `[RID:${requestId}] [DETECT_KEYS] ` +
+        `result_keys=${Object.keys(out || {}).join(",")} ` +
+        `image_validation_keys=${Object.keys(validation || {}).join(",")}`
+    );
+  }
+}
+
 function normalizeV2(
   parsed: any,
   workerVersion: string,
@@ -1343,7 +1381,8 @@ export default {
               proxyPing = { raw: text };
             }
           } catch (err) {
-            proxyPing = { error: String(err?.message || err) };
+            const msg = err instanceof Error ? err.message : String(err);
+            proxyPing = { error: msg };
           }
           return json({
             ok: true,
@@ -1367,24 +1406,30 @@ export default {
 
     if (url.pathname === "/analyze" && request.method === "POST") {
       const rayId = request.headers.get("cf-ray");
+      const requestId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
       const baseHeaders = {
         "x-proxy-version": "unknown",
         "x-openai-model": "unknown",
         "x-build-id": "unknown",
+        "x-request-id": requestId,
       };
       let context: Record<string, unknown> = {};
       try {
         const ct = request.headers.get("content-type") || "";
-        console.log("[ANALYZE] content-type=" + ct);
+        console.log(`[RID:${requestId}] [ANALYZE] content-type=${ct}`);
         if (!ct.includes("application/json")) {
-          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context: {} };
+          logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 422, baseHeaders);
         }
 
         const raw = await request.text();
-        console.log("[ANALYZE] rawLen=" + raw.length);
+        console.log(`[RID:${requestId}] [ANALYZE] rawLen=${raw.length}`);
         let body: Record<string, unknown> = {};
         try {
           body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -1392,7 +1437,7 @@ export default {
           body = {};
         }
 
-        console.log("[ANALYZE] body keys", Object.keys(body));
+        console.log(`[RID:${requestId}] [ANALYZE] body keys`, Object.keys(body));
         const userConfirmedStool =
           typeof (body as any).user_confirmed_stool === "boolean"
             ? (body as any).user_confirmed_stool
@@ -1402,39 +1447,41 @@ export default {
           (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
             ? (((body as any).context || (body as any).context_input) as Record<string, unknown>)
             : {};
-        console.log("[ANALYZE] context keys", Object.keys(context || {}));
+        console.log(`[RID:${requestId}] [ANALYZE] context keys`, Object.keys(context || {}));
         (body as any).context = context || {};
         const verifyHeader = request.headers.get("x-verify-token");
         const verifyEnabled = !!env.VERIFY_TOKEN;
         const verifyMatched = verifyEnabled && verifyHeader === env.VERIFY_TOKEN;
         if (verifyEnabled) {
           console.log(
-            "[ANALYZE] verify token present=" +
+            `[RID:${requestId}] [ANALYZE] verify token present=` +
               (verifyHeader ? "yes" : "no") +
               " matched=" +
               (verifyMatched ? "yes" : "no")
           );
         }
-        console.log("[ANALYZE] image type", typeof body.image);
+        console.log(`[RID:${requestId}] [ANALYZE] image type`, typeof body.image);
         console.log(
-          "[ANALYZE] image length",
+          `[RID:${requestId}] [ANALYZE] image length`,
           typeof body.image === "string" ? body.image.length : null
         );
         const image = typeof body.image === "string" ? body.image : "";
         if (!image || image.trim().length < 10 || image.trim() === "test") {
-          console.log("[ANALYZE] missing image keys", Object.keys(body));
-          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          console.log(`[RID:${requestId}] [ANALYZE] missing image keys`, Object.keys(body));
+          const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context };
+          logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 422, baseHeaders);
         }
 
         const imageBytes = decodeBase64Image(image);
         const dims = imageBytes ? getImageDimensions(imageBytes) : null;
         if (!imageBytes || !dims || dims.width < 512 || dims.height < 512) {
-          const invalid = buildInvalidImageResult(workerVersion, rayId);
+          const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           const normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context };
+          logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 422, baseHeaders);
         }
 
@@ -1444,9 +1491,9 @@ export default {
           "https://stool-ai-app.onrender.com";
         if (proxyUrl) {
           const proxy = proxyUrl.replace(/\/+$/, "") + "/analyze";
-          console.log("[PROXY] enabled host=" + new URL(proxyUrl).host);
+          console.log(`[RID:${requestId}] [PROXY] enabled host=${new URL(proxyUrl).host}`);
           const start = Date.now();
-          console.log("[OPENAI] start");
+          console.log(`[RID:${requestId}] [OPENAI] start`);
           const proxyResp = await fetch(proxy, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1468,19 +1515,20 @@ export default {
             "x-proxy-version": proxyVersion,
             "x-openai-model": proxyModel || "unknown",
             "x-build-id": proxyBuildId,
+            "x-request-id": requestId,
           };
           console.log(
-            `[PROXY] headers x-proxy-version=${proxyVersion} x-openai-model=${proxyModel || "unknown"} x-build-id=${proxyBuildId}`
+            `[RID:${requestId}] [PROXY] headers x-proxy-version=${proxyVersion} x-openai-model=${proxyModel || "unknown"} x-build-id=${proxyBuildId}`
           );
           const ms = Date.now() - start;
-          console.log("[OPENAI] done");
-          console.log("[OPENAI] ms=" + ms);
+          console.log(`[RID:${requestId}] [OPENAI] done`);
+          console.log(`[RID:${requestId}] [OPENAI] ms=${ms}`);
           const text = await proxyResp.text().catch(() => "");
           if (!proxyResp.ok) {
             console.log(
-              `[PROXY] status=${proxyResp.status} content-type=${proxyResp.headers.get("content-type") || ""}`
+              `[RID:${requestId}] [PROXY] status=${proxyResp.status} content-type=${proxyResp.headers.get("content-type") || ""}`
             );
-            console.log(`[PROXY] body preview=${text.slice(0, 200)}`);
+            console.log(`[RID:${requestId}] [PROXY] body preview=${text.slice(0, 200)}`);
           }
           let data: unknown;
           try {
@@ -1492,20 +1540,29 @@ export default {
             const modelUsed =
               (data as any)?.model_used || proxyModel || "unknown";
             if ((data as any)?.error_code) {
-            let normalized = normalizeV2(
+              let normalized = normalizeV2(
                 data,
                 workerVersion,
                 proxyVersion,
                 modelUsed
               );
-            const decision = applyDetectionPolicy(normalized, userConfirmedStool, contextAffectsFromInput(context));
-            normalized = decision.out;
-            if (decision.applied) {
-              console.log(
-                `[DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+              const decision = applyDetectionPolicy(
+                normalized,
+                userConfirmedStool,
+                contextAffectsFromInput(context)
               );
-            }
+              normalized = decision.out;
+              if (decision.applied) {
+                console.log(
+                  `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+                );
+              }
               normalized.input_echo = { context };
+              logDetect(
+                normalized,
+                requestId,
+                decision.proceed ? "proceed_analysis" : "block_not_stool"
+              );
               return json(normalized, 200, proxyHeaders);
             }
             const err = buildProxyErrorResult(
@@ -1513,10 +1570,11 @@ export default {
               proxyVersion,
               modelUsed,
               text || `proxy status ${proxyResp.status}`,
-              rayId
+              rayId || undefined
             );
             const normalized = normalizeV2(err, workerVersion, proxyVersion, modelUsed);
             normalized.input_echo = { context };
+            logDetect(normalized, requestId, "block_not_stool");
             return json(normalized, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
@@ -1536,10 +1594,15 @@ export default {
           normalized = decision.out;
           if (decision.applied) {
             console.log(
-              `[DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
+              `[RID:${requestId}] [DETECT] stool_confidence=${decision.conf?.toFixed(2)} scene=${normalized.stool_scene || "unknown"} form=${normalized.stool_form_hint || "unknown"} => proceed_with_analysis=${decision.proceed} ${decision.lowConf ? "(low_conf_mode)" : ""}`
             );
           }
           normalized.input_echo = { context };
+          logDetect(
+            normalized,
+            requestId,
+            decision.proceed ? "proceed_analysis" : "block_not_stool"
+          );
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
             if (guardFlag === false) {
@@ -1552,7 +1615,7 @@ export default {
         }
 
         if (!env.OPENAI_API_KEY) {
-          const normalized = normalizeV2(
+            const normalized = normalizeV2(
             {
               ok: false,
               error: "OPENAI_UNSUPPORTED_REGION",
@@ -1561,6 +1624,7 @@ export default {
             workerVersion
           );
           normalized.input_echo = { context };
+            logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1611,19 +1675,21 @@ export default {
             directModel
           );
           normalized.input_echo = { context };
+          logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 200, baseHeaders);
         }
 
         const data = await resp.json();
         const outputText = extractOutputText(data);
         if (!outputText) {
-          const normalized = normalizeV2(
+        const normalized = normalizeV2(
             { ok: false, error: "OPENAI_ERROR", message: "empty model output", rayId },
             workerVersion,
             undefined,
             directModel
           );
           normalized.input_echo = { context };
+        logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let parsed: any = {};
@@ -1637,10 +1703,12 @@ export default {
             directModel
           );
           normalized.input_echo = { context };
+          logDetect(normalized, requestId, "block_not_stool");
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         const normalized = normalizeV2(parsed, workerVersion, undefined, directModel);
         normalized.input_echo = { context };
+        logDetect(normalized, requestId, normalized.is_stool_image === false ? "block_not_stool" : "proceed_analysis");
         return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
       } catch (error: any) {
         console.log("[OPENAI] catch");
@@ -1653,6 +1721,7 @@ export default {
           "unknown"
         );
         normalized.input_echo = { context: {} };
+        logDetect(normalized, requestId, "block_not_stool");
         return json(normalized, 200, baseHeaders);
       }
     }
