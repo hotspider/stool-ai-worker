@@ -295,6 +295,64 @@ function buildInvalidImageResult(workerVersion: string, rayId?: string) {
   };
 }
 
+function buildProxyErrorResult(
+  workerVersion: string,
+  proxyVersion: string,
+  modelUsed: string,
+  message: string,
+  rayId?: string
+) {
+  return {
+    ok: false,
+    error_code: "PROXY_ERROR",
+    error: "PROXY_ERROR",
+    message,
+    schema_version: SCHEMA_VERSION,
+    worker_version: workerVersion,
+    proxy_version: proxyVersion || "unknown",
+    model_used: modelUsed || "unknown",
+    headline: "服务暂不可用，请稍后重试",
+    score: 0,
+    risk_level: "unknown",
+    confidence: 0,
+    uncertainty_note: "服务繁忙或网络异常，可稍后重试或更换清晰图片。",
+    stool_features: {
+      bristol_type: null,
+      color: null,
+      texture: null,
+      volume: "unknown",
+      visible_findings: [],
+    },
+    reasoning_bullets: [],
+    actions_today: { diet: [], hydration: [], care: [], avoid: [] },
+    red_flags: [],
+    follow_up_questions: [],
+    ui_strings: {
+      summary: "",
+      tags: [],
+      sections: [
+        {
+          title: "重试建议",
+          icon_key: "retry",
+          items: ["稍后再试", "检查网络连接", "更换清晰图片"],
+        },
+        {
+          title: "如何拍/如何裁剪",
+          icon_key: "camera",
+          items: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+        },
+      ],
+    },
+    summary: "",
+    bristol_type: null,
+    color: null,
+    texture: null,
+    hydration_hint: "",
+    diet_advice: [],
+    rayId,
+  };
+}
+
 function decodeBase64Image(input: string): Uint8Array | null {
   const s = input.trim();
   const b64 = s.startsWith("data:image/")
@@ -736,12 +794,17 @@ export default {
           } catch {
             data = { ok: false, error: "BAD_PROXY_RESPONSE", message: text };
           }
-          if (!proxyResp.ok && (data as any)?.ok !== true) {
-            data = {
-              ok: false,
-              error: "PROXY_ERROR",
-              message: text || `proxy status ${proxyResp.status}`,
-            };
+          if (!proxyResp.ok || (data as any)?.ok === false || (data as any)?.error) {
+            const modelUsed =
+              (data as any)?.model_used || proxyModel || "unknown";
+            const err = buildProxyErrorResult(
+              workerVersion,
+              proxyVersion,
+              modelUsed,
+              text || `proxy status ${proxyResp.status}`,
+              rayId
+            );
+            return json(err, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
             data = upgradeLegacyResult(data);
