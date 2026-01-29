@@ -156,6 +156,10 @@ function buildDefaultResult() {
     worker_version: "",
     proxy_version: "unknown",
     model_used: "unknown",
+    model_primary: "",
+    model_fallback: "",
+    used_fallback: false,
+    primary_error: "",
     headline: "",
     score: 50,
     risk_level: "low",
@@ -247,6 +251,7 @@ function buildDefaultResult() {
     hydration_hint: "",
     diet_advice: [],
     explanation: "",
+    image_validation: null,
   };
 }
 
@@ -299,6 +304,7 @@ function buildInvalidImageResult(workerVersion: string, rayId?: string) {
   return {
     ...base,
     ok: false,
+    is_stool_image: false,
     error_code: "INVALID_IMAGE",
     error: "INVALID_IMAGE",
     message: "image is missing or invalid",
@@ -470,6 +476,40 @@ function ensureMinRedFlags(
   return out;
 }
 
+function hasContextInput(ctx: Record<string, unknown>) {
+  const foods = String((ctx as any)?.foods_eaten || "").trim();
+  const drinks = String((ctx as any)?.drinks_taken || "").trim();
+  const mood = String((ctx as any)?.mood_state || "").trim();
+  const notes = String((ctx as any)?.other_notes || "").trim();
+  return Boolean(foods || drinks || mood || notes);
+}
+
+function contextSummaryFromInput(ctx: Record<string, unknown>) {
+  const parts: string[] = [];
+  const foods = String((ctx as any)?.foods_eaten || "").trim();
+  if (foods) parts.push(`吃了：${foods}`);
+  const drinks = String((ctx as any)?.drinks_taken || "").trim();
+  if (drinks) parts.push(`喝了：${drinks}`);
+  const mood = String((ctx as any)?.mood_state || "").trim();
+  if (mood) parts.push(`精神状态：${mood}`);
+  const notes = String((ctx as any)?.other_notes || "").trim();
+  if (notes) parts.push(`其他：${notes}`);
+  return parts.length ? `你填写的情况显示：${parts.join("；")}` : "";
+}
+
+function contextAffectsFromInput(ctx: Record<string, unknown>) {
+  const items: string[] = [];
+  const foods = String((ctx as any)?.foods_eaten || "").trim();
+  if (foods) items.push(`近期饮食（${foods}）可能影响颜色与软硬度`);
+  const drinks = String((ctx as any)?.drinks_taken || "").trim();
+  if (drinks) items.push(`饮水/饮品（${drinks}）可能影响水分含量`);
+  const mood = String((ctx as any)?.mood_state || "").trim();
+  if (mood) items.push(`精神状态（${mood}）有助判断是否存在不适`);
+  const notes = String((ctx as any)?.other_notes || "").trim();
+  if (notes) items.push(`补充说明提示：${notes}`);
+  return items;
+}
+
 function normalizeV2(
   parsed: any,
   workerVersion: string,
@@ -493,6 +533,12 @@ function normalizeV2(
   out.worker_version = out.worker_version || workerVersion;
   out.proxy_version = proxyVersion || out.proxy_version || "unknown";
   out.model_used = modelUsed || out.model_used || "unknown";
+  out.model_primary = out.model_primary || "";
+  out.model_fallback = out.model_fallback || "";
+  out.used_fallback = typeof out.used_fallback === "boolean" ? out.used_fallback : false;
+  out.primary_error = typeof out.primary_error === "string" ? out.primary_error : "";
+  out.image_validation =
+    out.image_validation && typeof out.image_validation === "object" ? out.image_validation : null;
   out.context_input = out.context_input && typeof out.context_input === "object" ? out.context_input : undefined;
   out.input_context = out.input_context && typeof out.input_context === "object" ? out.input_context : out.context_input;
   out.context_summary = typeof out.context_summary === "string" ? out.context_summary : "";
@@ -513,6 +559,13 @@ function normalizeV2(
   out.input_echo = {
     context: echo && typeof echo.context === "object" ? echo.context : {},
   };
+  const derivedSummary = contextSummaryFromInput(out.input_echo.context || {});
+  if (derivedSummary && out.context_summary.includes("未提供补充信息")) {
+    out.context_summary = derivedSummary;
+  } else if (derivedSummary && !out.context_summary) {
+    out.context_summary = derivedSummary;
+  }
+  const contextAffects = contextAffectsFromInput(out.input_echo.context || {});
 
   out.score = Number.isFinite(Number(out.score)) ? Number(out.score) : base.score;
   out.confidence = Number.isFinite(Number(out.confidence))
@@ -531,7 +584,9 @@ function normalizeV2(
     out.risk_level = "unknown";
   }
 
-  out.stool_features = {
+  out.stool_features = out.is_stool_image === false
+    ? null
+    : {
     shape:
       typeof stool.shape === "string" && stool.shape.trim()
         ? stool.shape.trim()
@@ -623,11 +678,6 @@ function normalizeV2(
       ["未见明显异常"]
     );
   }
-  out.stool_features.abnormal_signs = ensureMinItems(
-    out.stool_features.abnormal_signs,
-    1,
-    ["未见明显异常"]
-  );
 
   out.doctor_explanation = {
     one_sentence_conclusion:
@@ -728,6 +778,79 @@ function normalizeV2(
       out.doctor_explanation.reassure =
         "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
+  }
+
+  if (out.is_stool_image === false) {
+    out.stool_features = null;
+    out.possible_causes = [];
+    out.reasoning_bullets = [];
+    out.actions_today = { diet: [], hydration: [], care: [], avoid: [], observe: [] };
+    out.red_flags = [];
+    out.follow_up_questions = ["是否选错了图片？", "是否需要重新拍摄更清晰的照片？"];
+    out.interpretation = {
+      ...out.interpretation,
+      overall_judgement: "无法判断是否为大便图片",
+      why_shape: [],
+      why_color: [],
+      why_texture: [],
+      how_context_affects: contextAffects.length
+        ? contextAffects
+        : ["本次仅用于确认是否为大便图片"],
+      confidence_explain: "当前图片未识别为大便，无法进入健康分析。",
+    };
+    out.context_summary = hasContextInput(out.input_echo.context || {})
+      ? contextSummaryFromInput(out.input_echo.context || {})
+      : "本次仅用于确认是否为大便图片。";
+    out.doctor_explanation = {
+      one_sentence_conclusion: out.headline || "这张图片未识别到大便，暂时无法分析。",
+      shape: "",
+      color: "",
+      texture: "",
+      visual_analysis: { shape: "", color: "", texture: "" },
+      combined_judgement: "",
+      causes: "",
+      todo: "",
+      red_flags: "",
+      reassure: "",
+    };
+    out.ui_strings = {
+      summary: "未识别到大便图片，建议重新拍摄后再分析。",
+      tags: ["非大便图片"],
+      sections: [
+        {
+          title: "无法分析的原因",
+          icon_key: "camera",
+          items: ["图片中未识别到大便", "可能拍到其他物体或场景", "目标不清晰或被遮挡"],
+        },
+        {
+          title: "如何重拍",
+          icon_key: "retry",
+          items: ["光线充足，避免背光/反光", "对焦清晰，目标占画面 50% 以上", "尽量减少背景干扰"],
+        },
+        {
+          title: "常见错误示例",
+          icon_key: "info",
+          items: ["拍到纸巾/地面/玩具/衣物", "画面过暗或强反光", "目标过小或被遮挡"],
+        },
+      ],
+      longform: {
+        conclusion: "这张图片未识别到大便，暂时无法分析。",
+        how_to_read: "当前图片无法用于判断大便性状，请更清晰地重新拍摄。",
+        context: "本次仅用于确认是否为大便图片，无需补充更多信息。",
+        causes: "可能选错图片或目标未清晰入镜。",
+        todo: "请重新拍摄：光线充足、对焦清晰、目标占画面 50% 以上。",
+        red_flags: "如宝宝出现持续发热、便血或精神明显差，请及时就医。",
+        reassure: "这是识别失败提示，并非健康结论。",
+      },
+    };
+    if (!out.image_validation) {
+      out.image_validation = {
+        status: "not_stool",
+        reason: out.explanation || "未识别到大便图像。",
+        tips: ["对焦清晰", "光线充足", "目标占画面 50% 以上"],
+      };
+    }
+    return out;
   }
 
   out.possible_causes = ensureMinItems(
@@ -965,6 +1088,13 @@ function normalizeV2(
     3,
     base.interpretation.how_context_affects
   );
+  if (contextAffects.length) {
+    out.interpretation.how_context_affects = ensureMinItems(
+      contextAffects,
+      3,
+      contextAffects
+    );
+  }
 
   const howToReadFallback =
     out.is_stool_image === false
