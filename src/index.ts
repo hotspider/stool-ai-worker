@@ -3,6 +3,7 @@ export interface Env {
   OPENAI_PROXY_URL?: string;
   OPENAI_PROXY_BASE_URL?: string;
   WORKER_VERSION?: string;
+  WORKER_GIT?: string;
   VERIFY_TOKEN?: string;
 }
 
@@ -636,6 +637,12 @@ function applyDecisionAndLog(
     normalized = applyLowConfidenceDecision(normalized, decision.reason);
   } else {
     normalized.is_stool_image = true;
+  }
+  if (decision.decision !== "block_not_stool" && normalized?.error_code === "NOT_STOOL_IMAGE") {
+    delete normalized.error_code;
+    if (normalized?.error === "NOT_STOOL_IMAGE") {
+      delete normalized.error;
+    }
   }
   logDetect(normalized, requestId, decision.decision, decision.reason);
   return normalized;
@@ -1374,12 +1381,15 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     void ctx;
     const url = new URL(request.url);
-    if (url.pathname !== "/analyze") {
-      console.log(`[RID:na] [WORKER] request ${request.method} ${url.pathname}`);
-    }
+    const requestId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    console.log(`[RID:${requestId}] [WORKER] request ${request.method} ${url.pathname}`);
     const origin = request.headers.get("Origin") || undefined;
 
-    const workerVersion = env.WORKER_VERSION ?? "dev";
+    const workerGit = env.WORKER_GIT ?? "unknown";
+    const workerVersion = workerGit;
     const json = (data: unknown, status = 200, extraHeaders: Record<string, string> = {}) => {
       let payload: unknown = data;
       if (data && typeof data === "object") {
@@ -1394,7 +1404,9 @@ export default {
         headers: {
           "content-type": "application/json",
           "x-worker-version": workerVersion,
+          "x-worker-git": workerGit,
           "schema_version": String(SCHEMA_VERSION),
+          "x-request-id": requestId,
           ...extraHeaders,
           ...corsHeaders(origin),
         },
@@ -1452,15 +1464,11 @@ export default {
 
     if (url.pathname === "/analyze" && request.method === "POST") {
       const rayId = request.headers.get("cf-ray");
-      const requestId =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-      console.log(`[RID:${requestId}] [WORKER] request ${request.method} ${url.pathname}`);
       const baseHeaders = {
         "x-proxy-version": "unknown",
         "x-openai-model": "unknown",
         "x-build-id": "unknown",
+        "x-worker-git": workerGit,
         "x-request-id": requestId,
       };
       let context: Record<string, unknown> = {};
