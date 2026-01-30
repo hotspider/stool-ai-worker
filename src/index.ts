@@ -648,6 +648,41 @@ function applyDecisionAndLog(
   return normalized;
 }
 
+const INVALID_CONTEXT_VALUES = new Set([
+  "无",
+  "没有",
+  "不清楚",
+  "不知道",
+  "-",
+  "—",
+  "ok",
+  "1",
+]);
+
+function normalizeContextText(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isValidContextText(value: unknown): boolean {
+  const normalized = normalizeContextText(value);
+  if (normalized.length < 2) return false;
+  return !INVALID_CONTEXT_VALUES.has(normalized);
+}
+
+function hasValidContextFields(context: Record<string, unknown>) {
+  const fields = ["foods_eaten", "drinks_taken", "mood_state", "other_notes"];
+  const valid: string[] = [];
+  const invalid: string[] = [];
+  for (const key of fields) {
+    if (isValidContextText(context[key])) {
+      valid.push(key);
+    } else {
+      invalid.push(key);
+    }
+  }
+  return { valid, invalid, hasAny: valid.length > 0 };
+}
+
 function computeDetectDecision(out: any, userConfirmed: boolean): {
   decision: "proceed_analysis" | "proceed_low_confidence" | "block_not_stool";
   reason: string;
@@ -1503,6 +1538,10 @@ export default {
           typeof (body as any).user_confirmed_stool === "boolean"
             ? (body as any).user_confirmed_stool
             : false;
+        const mode =
+          typeof (body as any).mode === "string" && (body as any).mode.trim()
+            ? String((body as any).mode).trim()
+            : "prod";
         context =
           body &&
           (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
@@ -1510,6 +1549,36 @@ export default {
             : {};
         console.log(`[RID:${requestId}] [ANALYZE] context keys`, Object.keys(context || {}));
         (body as any).context = context || {};
+        if (mode !== "debug") {
+          const ctxCheck = hasValidContextFields(context);
+          if (!ctxCheck.hasAny) {
+            console.log(
+              `[RID:${requestId}] [VALIDATION] missing_context fields=${ctxCheck.invalid.join(",")}`
+            );
+            let normalized = normalizeV2(
+              {
+                ok: false,
+                error_code: "MISSING_CONTEXT",
+                error: "MISSING_CONTEXT",
+                headline: "请先补充信息再分析",
+                ui_strings: {
+                  summary: "请补充饮食/饮水/精神状态后再提交分析。",
+                },
+                is_stool_image: true,
+                image_validation: {
+                  status: "low_confidence",
+                  reason: "missing_context",
+                  tips: ["请补充吃了什么/喝了什么/精神状态"],
+                },
+              },
+              workerVersion
+            );
+            normalized.worker_version = workerVersion;
+            normalized.input_echo = { context };
+            logDetect(normalized, requestId, "proceed_low_confidence", "missing_context");
+            return json(normalized, 400, baseHeaders);
+          }
+        }
         const verifyHeader = request.headers.get("x-verify-token");
         const verifyEnabled = !!env.VERIFY_TOKEN;
         const verifyMatched = verifyEnabled && verifyHeader === env.VERIFY_TOKEN;
