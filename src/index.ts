@@ -153,6 +153,7 @@ function buildDefaultResult() {
   return {
     ok: true,
     schema_version: SCHEMA_VERSION,
+    analysis_confidence: 0.6,
     is_stool_image: true,
     stool_confidence: null,
     stool_scene: "unknown",
@@ -259,6 +260,178 @@ function buildDefaultResult() {
     explanation: "",
     image_validation: null,
   };
+}
+
+function resolveAnalysisConfidence(out: any) {
+  const modelConf = Number(out?.analysis_confidence);
+  if (Number.isFinite(modelConf)) return modelConf;
+  const confidence = Number(out?.confidence);
+  if (Number.isFinite(confidence)) return confidence;
+  const stoolConf = Number(out?.stool_confidence);
+  if (Number.isFinite(stoolConf)) return stoolConf;
+  return 0.2;
+}
+
+function buildFullResponse(partial: any) {
+  const base = buildDefaultResult();
+  const out = { ...base, ...(partial || {}) } as any;
+  out.stool_features = { ...base.stool_features, ...(out.stool_features || {}) };
+  out.doctor_explanation = { ...base.doctor_explanation, ...(out.doctor_explanation || {}) };
+  out.interpretation = { ...base.interpretation, ...(out.interpretation || {}) };
+  out.actions_today = { ...base.actions_today, ...(out.actions_today || {}) };
+  out.ui_strings = { ...base.ui_strings, ...(out.ui_strings || {}) };
+  out.ui_strings.longform = {
+    ...base.ui_strings.longform,
+    ...(out.ui_strings?.longform || {}),
+  };
+  out.input_echo =
+    out.input_echo && typeof out.input_echo === "object" ? out.input_echo : base.input_echo;
+
+  const analysisConfidence = resolveAnalysisConfidence(out);
+  const stoolConfidence = Number.isFinite(Number(out.stool_confidence))
+    ? Number(out.stool_confidence)
+    : analysisConfidence;
+  const lowConfidence =
+    stoolConfidence < 0.5 ||
+    out.stool_scene === "unknown" ||
+    out.image_validation?.status === "low_confidence";
+
+  out.ok = true;
+  out.error_code = null;
+  out.error = null;
+  out.is_stool_image = true;
+  out.not_stool_reason = "";
+  out.analysis_confidence = analysisConfidence;
+  out.stool_confidence = stoolConfidence;
+  out.stool_scene = out.stool_scene || "unknown";
+  out.stool_form_hint = out.stool_form_hint || "unknown";
+
+  const headline = "参考分析结果";
+  out.headline = headline;
+  out.ui_strings.summary = out.ui_strings.summary || out.summary || headline;
+  out.ui_strings.longform.conclusion = out.ui_strings.longform.conclusion || headline;
+
+  out.stool_features = {
+    ...out.stool_features,
+    bristol_type:
+      out.stool_features?.bristol_type === null ||
+      out.stool_features?.bristol_type === undefined
+        ? 5
+        : out.stool_features.bristol_type,
+    bristol_range: out.stool_features?.bristol_range || "4-6",
+    shape: out.stool_features?.shape || "不确定",
+    color: out.stool_features?.color || "不确定",
+    texture: out.stool_features?.texture || "不确定",
+    abnormal_signs: ensureMinItems(
+      Array.isArray(out.stool_features?.abnormal_signs)
+        ? out.stool_features.abnormal_signs.map(String)
+        : [],
+      1,
+      ["未见明显异常"]
+    ),
+    visible_findings: ensureMinItems(
+      Array.isArray(out.stool_features?.visible_findings)
+        ? out.stool_features.visible_findings.map(String)
+        : [],
+      1,
+      ["none"]
+    ),
+    color_desc: out.stool_features?.color_desc || "",
+    texture_desc: out.stool_features?.texture_desc || "",
+    shape_desc: out.stool_features?.shape_desc || "",
+    color_reason: out.stool_features?.color_reason || "",
+  };
+
+  out.doctor_explanation = {
+    ...out.doctor_explanation,
+    visual_analysis: out.doctor_explanation?.visual_analysis || {
+      shape: "",
+      color: "",
+      texture: "",
+    },
+    combined_judgement: out.doctor_explanation?.combined_judgement || "",
+  };
+  out.interpretation = {
+    ...out.interpretation,
+    why_shape: ensureMinItems(
+      Array.isArray(out.interpretation?.why_shape) ? out.interpretation.why_shape.map(String) : [],
+      2,
+      base.interpretation.why_shape
+    ),
+    why_color: ensureMinItems(
+      Array.isArray(out.interpretation?.why_color) ? out.interpretation.why_color.map(String) : [],
+      2,
+      base.interpretation.why_color
+    ),
+    why_texture: ensureMinItems(
+      Array.isArray(out.interpretation?.why_texture)
+        ? out.interpretation.why_texture.map(String)
+        : [],
+      2,
+      base.interpretation.why_texture
+    ),
+  };
+
+  out.reasoning_bullets = ensureMinItems(
+    Array.isArray(out.reasoning_bullets) ? out.reasoning_bullets.map(String) : [],
+    5,
+    DEFAULT_REASONING
+  );
+
+  out.actions_today = {
+    diet: ensureMinItems(
+      Array.isArray(out.actions_today?.diet) ? out.actions_today.diet.map(String) : [],
+      3,
+      DEFAULT_DIET
+    ),
+    hydration: ensureMinItems(
+      Array.isArray(out.actions_today?.hydration)
+        ? out.actions_today.hydration.map(String)
+        : [],
+      3,
+      DEFAULT_HYDRATION
+    ),
+    care: ensureMinItems(
+      Array.isArray(out.actions_today?.care) ? out.actions_today.care.map(String) : [],
+      3,
+      DEFAULT_CARE
+    ),
+    avoid: ensureMinItems(
+      Array.isArray(out.actions_today?.avoid) ? out.actions_today.avoid.map(String) : [],
+      3,
+      DEFAULT_AVOID
+    ),
+    observe: ensureMinItems(
+      Array.isArray(out.actions_today?.observe) ? out.actions_today.observe.map(String) : [],
+      3,
+      DEFAULT_OBSERVE
+    ),
+  };
+
+  out.summary =
+    out.summary || "已给出参考分析与建议，如症状加重请及时就医。";
+  out.hydration_hint = out.hydration_hint || out.actions_today.hydration[0] || "";
+  out.diet_advice = Array.isArray(out.diet_advice) ? out.diet_advice : out.actions_today.diet;
+
+  out.uncertainty_note = lowConfidence
+    ? "识别置信度较低，以下为参考分析；建议下次拍更近更清晰。"
+    : out.uncertainty_note || "如症状持续或加重，请及时就医。";
+
+  if (!out.image_validation || typeof out.image_validation !== "object") {
+    out.image_validation = {
+      status: lowConfidence ? "low_confidence" : "normal",
+      reason: lowConfidence ? "model_uncertain" : "",
+      tips: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+    };
+  } else if (lowConfidence) {
+    out.image_validation = {
+      ...out.image_validation,
+      status: "low_confidence",
+      reason: "model_uncertain",
+    };
+  }
+
+  return out;
 }
 
 const DEFAULT_REASONING = [
@@ -608,15 +781,16 @@ function applyLowConfidenceDecision(out: any, reason: string) {
   out.is_stool_image = true;
   out.confidence = Math.min(out.confidence || 1, 0.4);
   out.uncertainty_note =
-    "识别不确定（可能为糊状/尿不湿场景），仍提供参考分析，建议补拍清晰近距图片。";
+    "识别置信度较低，以下为参考分析；建议下次拍更近更清晰。";
   out.image_validation = {
     status: "low_confidence",
-    reason: reason || out.stool_detection_rationale || "识别置信度较低",
+    reason: "model_uncertain",
     tips: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
     stool_confidence: out.stool_confidence,
     stool_scene: out.stool_scene || "unknown",
     stool_form_hint: out.stool_form_hint || "unknown",
   };
+  out.headline = "参考分析结果";
   return out;
 }
 
@@ -628,17 +802,15 @@ function applyDecisionAndLog(
 ) {
   const decision = computeDetectDecision(out, userConfirmed);
   let normalized = out;
-  if (decision.decision === "block_not_stool") {
-    normalized = applyNonStoolOverrides(
-      applyNotStoolDecision(normalized, decision.reason),
-      contextAffects
+  if (decision.decision === "proceed_low_confidence") {
+    normalized = applyLowConfidenceDecision(
+      normalized,
+      decision.validationReason || decision.reason
     );
-  } else if (decision.decision === "proceed_low_confidence") {
-    normalized = applyLowConfidenceDecision(normalized, decision.reason);
   } else {
     normalized.is_stool_image = true;
   }
-  if (decision.decision !== "block_not_stool" && normalized?.error_code === "NOT_STOOL_IMAGE") {
+  if (normalized?.error_code === "NOT_STOOL_IMAGE") {
     delete normalized.error_code;
     if (normalized?.error === "NOT_STOOL_IMAGE") {
       delete normalized.error;
@@ -648,44 +820,10 @@ function applyDecisionAndLog(
   return normalized;
 }
 
-const INVALID_CONTEXT_VALUES = new Set([
-  "无",
-  "没有",
-  "不清楚",
-  "不知道",
-  "-",
-  "—",
-  "ok",
-  "1",
-]);
-
-function normalizeContextText(value: unknown): string {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function isValidContextText(value: unknown): boolean {
-  const normalized = normalizeContextText(value);
-  if (normalized.length < 2) return false;
-  return !INVALID_CONTEXT_VALUES.has(normalized);
-}
-
-function hasValidContextFields(context: Record<string, unknown>) {
-  const fields = ["foods_eaten", "drinks_taken", "mood_state", "other_notes"];
-  const valid: string[] = [];
-  const invalid: string[] = [];
-  for (const key of fields) {
-    if (isValidContextText(context[key])) {
-      valid.push(key);
-    } else {
-      invalid.push(key);
-    }
-  }
-  return { valid, invalid, hasAny: valid.length > 0 };
-}
-
 function computeDetectDecision(out: any, userConfirmed: boolean): {
-  decision: "proceed_analysis" | "proceed_low_confidence" | "block_not_stool";
+  decision: "proceed_analysis" | "proceed_low_confidence";
   reason: string;
+  validationReason: string;
   conf: number;
 } {
   const conf = Number.isFinite(Number(out.stool_confidence))
@@ -693,23 +831,48 @@ function computeDetectDecision(out: any, userConfirmed: boolean): {
     : Number.isFinite(Number(out.image_validation?.stool_confidence))
       ? Number(out.image_validation.stool_confidence)
       : NaN;
-  if (userConfirmed) {
-    return { decision: "proceed_low_confidence", reason: "user_confirmed_stool", conf };
-  }
   if (out.is_stool_image === true) {
     if (Number.isFinite(conf) && conf < 0.25) {
-      return { decision: "proceed_low_confidence", reason: "low_confidence", conf };
+      return {
+        decision: "proceed_low_confidence",
+        reason: "low_confidence",
+        validationReason: "low_confidence",
+        conf,
+      };
     }
-    return { decision: "proceed_analysis", reason: "stool_image_true", conf };
+    return { decision: "proceed_analysis", reason: "stool_image_true", validationReason: "", conf };
   }
   if (out.is_stool_image === false) {
-    const status = out?.image_validation?.status;
-    if (status === "not_stool") {
-      return { decision: "block_not_stool", reason: "image_validation_not_stool", conf };
+    if (userConfirmed) {
+      return {
+        decision: "proceed_low_confidence",
+        reason: "user_confirmed_stool_force_analysis",
+        validationReason: "user_confirmed_stool",
+        conf,
+      };
     }
-    return { decision: "proceed_low_confidence", reason: "not_stool_but_uncertain", conf };
+    const status = out?.image_validation?.status;
+    return {
+      decision: "proceed_low_confidence",
+      reason: status === "not_stool" ? "image_validation_not_stool" : "not_stool_but_uncertain",
+      validationReason: status === "not_stool" ? "image_validation_not_stool" : "not_stool_but_uncertain",
+      conf,
+    };
   }
-  return { decision: "proceed_low_confidence", reason: "missing_flag", conf };
+  if (userConfirmed) {
+    return {
+      decision: "proceed_low_confidence",
+      reason: "user_confirmed_stool_force_analysis",
+      validationReason: "user_confirmed_stool",
+      conf,
+    };
+  }
+  return {
+    decision: "proceed_low_confidence",
+    reason: "missing_flag",
+    validationReason: "missing_flag",
+    conf,
+  };
 }
 
 function truncateLogText(value: unknown, limit = 200) {
@@ -1038,10 +1201,6 @@ function normalizeV2(
         "若精神食欲良好且尿量正常，通常可先观察并持续记录。";
     }
   }
-  if (out.is_stool_image === false) {
-    return applyNonStoolOverrides(out, contextAffects);
-  }
-
   out.possible_causes = ensureMinItems(
     causes.map((item: any) => {
       if (!item || typeof item !== "object") {
@@ -1313,6 +1472,12 @@ function normalizeV2(
   out.texture = out.stool_features?.texture_desc ?? null;
   out.hydration_hint = out.actions_today.hydration[0] || "";
   out.diet_advice = out.actions_today.diet || [];
+  if (out.is_stool_image === true && out.error_code === "NOT_STOOL_IMAGE") {
+    delete out.error_code;
+    if (out.error === "NOT_STOOL_IMAGE") {
+      delete out.error;
+    }
+  }
 
   return out;
 }
@@ -1521,7 +1686,8 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          return json(normalized, 422, baseHeaders);
+          normalized = buildFullResponse(normalized);
+          return json(normalized, 200, baseHeaders);
         }
 
         const raw = await request.text();
@@ -1538,10 +1704,6 @@ export default {
           typeof (body as any).user_confirmed_stool === "boolean"
             ? (body as any).user_confirmed_stool
             : false;
-        const mode =
-          typeof (body as any).mode === "string" && (body as any).mode.trim()
-            ? String((body as any).mode).trim()
-            : "prod";
         context =
           body &&
           (typeof (body as any).context === "object" || typeof (body as any).context_input === "object")
@@ -1549,36 +1711,6 @@ export default {
             : {};
         console.log(`[RID:${requestId}] [ANALYZE] context keys`, Object.keys(context || {}));
         (body as any).context = context || {};
-        if (mode !== "debug") {
-          const ctxCheck = hasValidContextFields(context);
-          if (!ctxCheck.hasAny) {
-            console.log(
-              `[RID:${requestId}] [VALIDATION] missing_context fields=${ctxCheck.invalid.join(",")}`
-            );
-            let normalized = normalizeV2(
-              {
-                ok: false,
-                error_code: "MISSING_CONTEXT",
-                error: "MISSING_CONTEXT",
-                headline: "请先补充信息再分析",
-                ui_strings: {
-                  summary: "请补充饮食/饮水/精神状态后再提交分析。",
-                },
-                is_stool_image: true,
-                image_validation: {
-                  status: "low_confidence",
-                  reason: "missing_context",
-                  tips: ["请补充吃了什么/喝了什么/精神状态"],
-                },
-              },
-              workerVersion
-            );
-            normalized.worker_version = workerVersion;
-            normalized.input_echo = { context };
-            logDetect(normalized, requestId, "proceed_low_confidence", "missing_context");
-            return json(normalized, 400, baseHeaders);
-          }
-        }
         const verifyHeader = request.headers.get("x-verify-token");
         const verifyEnabled = !!env.VERIFY_TOKEN;
         const verifyMatched = verifyEnabled && verifyHeader === env.VERIFY_TOKEN;
@@ -1607,7 +1739,8 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          return json(normalized, 422, baseHeaders);
+          normalized = buildFullResponse(normalized);
+          return json(normalized, 200, baseHeaders);
         }
 
         const imageBytes = decodeBase64Image(image);
@@ -1622,7 +1755,8 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          return json(normalized, 422, baseHeaders);
+          normalized = buildFullResponse(normalized);
+          return json(normalized, 200, baseHeaders);
         }
 
         const proxyUrl =
@@ -1693,6 +1827,7 @@ export default {
                 contextAffectsFromInput(context),
                 requestId
               );
+              normalized = buildFullResponse(normalized);
               return json(normalized, 200, proxyHeaders);
             }
             const err = buildProxyErrorResult(
@@ -1710,6 +1845,7 @@ export default {
               contextAffectsFromInput(context),
               requestId
             );
+            normalized = buildFullResponse(normalized);
             return json(normalized, 200, proxyHeaders);
           }
           if ((data as any)?.ok === true) {
@@ -1732,6 +1868,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
+          normalized = buildFullResponse(normalized);
           if (normalized && typeof normalized === "object") {
             const guardFlag = (normalized as any).is_stool_image;
             if (guardFlag === false) {
@@ -1765,6 +1902,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
+          normalized = buildFullResponse(normalized);
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1827,6 +1965,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
+          normalized = buildFullResponse(normalized);
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1846,6 +1985,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
+          normalized = buildFullResponse(normalized);
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let parsed: any = {};
@@ -1865,6 +2005,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
+          normalized = buildFullResponse(normalized);
           return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
         }
         let normalized = normalizeV2(parsed, workerVersion, undefined, directModel);
@@ -1875,6 +2016,7 @@ export default {
           contextAffectsFromInput(context),
           requestId
         );
+        normalized = buildFullResponse(normalized);
         return json(normalized, 200, { ...baseHeaders, "x-openai-model": directModel });
       } catch (error: any) {
         console.log(`[RID:${requestId}] [OPENAI] catch`);
@@ -1904,6 +2046,7 @@ export default {
           contextAffectsFromInput(context),
           requestId
         );
+        normalized = buildFullResponse(normalized);
         return json(normalized, 200, baseHeaders);
       }
     }
