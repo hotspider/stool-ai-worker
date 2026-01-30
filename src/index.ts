@@ -272,8 +272,74 @@ function resolveAnalysisConfidence(out: any) {
   return 0.2;
 }
 
-function buildFullResponse(partial: any) {
+function buildResponseSkeleton(schemaVersion = SCHEMA_VERSION) {
   const base = buildDefaultResult();
+  const summaryText =
+    "参考分析结果，建议在光线充足、近距离、对焦清晰重新拍摄。";
+  return {
+    ...base,
+    ok: true,
+    schema_version: schemaVersion,
+    headline: "参考分析结果",
+    summary: summaryText,
+    analysis_confidence: 0.35,
+    uncertainty_note:
+      "图片清晰度/场景不典型，以下为参考分析。建议在光线充足、近距离、对焦清晰重新拍摄。",
+    stool_confidence: 0.35,
+    stool_scene: "unknown",
+    stool_form_hint: "unknown",
+    stool_features: {
+      ...base.stool_features,
+      bristol_type: 5,
+      bristol_range: "4-6",
+      shape: "不确定",
+      color: "不确定",
+      texture: "不确定",
+      color_reason: "",
+      abnormal_signs: ["未见明显异常"],
+      color_desc: "",
+      texture_desc: "",
+      shape_desc: "",
+      visible_findings: ["none"],
+    },
+    doctor_explanation: {
+      ...base.doctor_explanation,
+      visual_analysis: { shape: "", color: "", texture: "" },
+      combined_judgement: "",
+    },
+    interpretation: {
+      ...base.interpretation,
+      why_shape: base.interpretation.why_shape,
+      why_color: base.interpretation.why_color,
+      why_texture: base.interpretation.why_texture,
+    },
+    reasoning_bullets: DEFAULT_REASONING.slice(),
+    actions_today: {
+      diet: DEFAULT_DIET.slice(),
+      hydration: DEFAULT_HYDRATION.slice(),
+      care: DEFAULT_CARE.slice(),
+      avoid: DEFAULT_AVOID.slice(),
+      observe: DEFAULT_OBSERVE.slice(),
+    },
+    hydration_hint: DEFAULT_HYDRATION[0],
+    diet_advice: DEFAULT_DIET.slice(),
+    image_validation: {
+      status: "low_confidence",
+      reason: "model_uncertain",
+      tips: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+      stool_confidence: 0.35,
+      stool_scene: "unknown",
+      stool_form_hint: "unknown",
+    },
+    worker_version: "",
+    proxy_version: "unknown",
+    model_used: "unknown",
+    request_id: "",
+  };
+}
+
+function buildFullResponse(partial: any, options: { forceOk?: boolean } = {}) {
+  const base = buildResponseSkeleton();
   const out = { ...base, ...(partial || {}) } as any;
   out.stool_features = { ...base.stool_features, ...(out.stool_features || {}) };
   out.doctor_explanation = { ...base.doctor_explanation, ...(out.doctor_explanation || {}) };
@@ -287,29 +353,39 @@ function buildFullResponse(partial: any) {
   out.input_echo =
     out.input_echo && typeof out.input_echo === "object" ? out.input_echo : base.input_echo;
 
-  const analysisConfidence = resolveAnalysisConfidence(out);
+  const forceOk = options.forceOk !== false;
+  const analysisConfidenceRaw = resolveAnalysisConfidence(out);
   const stoolConfidence = Number.isFinite(Number(out.stool_confidence))
     ? Number(out.stool_confidence)
-    : analysisConfidence;
+    : analysisConfidenceRaw;
   const lowConfidence =
     stoolConfidence < 0.5 ||
     out.stool_scene === "unknown" ||
-    out.image_validation?.status === "low_confidence";
+    out.image_validation?.status === "low_confidence" ||
+    out.image_validation?.status === "not_stool";
+  const analysisConfidence = lowConfidence ? 0.35 : analysisConfidenceRaw;
 
-  out.ok = true;
-  out.error_code = null;
-  out.error = null;
-  out.is_stool_image = true;
-  out.not_stool_reason = "";
+  if (forceOk) {
+    out.ok = true;
+    out.error_code = null;
+    out.error = null;
+    out.is_stool_image = true;
+    out.not_stool_reason = "";
+  } else {
+    out.ok = out.ok === false ? false : true;
+  }
   out.analysis_confidence = analysisConfidence;
   out.stool_confidence = stoolConfidence;
   out.stool_scene = out.stool_scene || "unknown";
   out.stool_form_hint = out.stool_form_hint || "unknown";
 
   const headline = "参考分析结果";
+  const summaryText =
+    "参考分析结果，建议在光线充足、近距离、对焦清晰重新拍摄。";
   out.headline = headline;
-  out.ui_strings.summary = out.ui_strings.summary || out.summary || headline;
-  out.ui_strings.longform.conclusion = out.ui_strings.longform.conclusion || headline;
+  out.summary = summaryText;
+  out.ui_strings.summary = summaryText;
+  out.ui_strings.longform.conclusion = headline;
 
   out.stool_features = {
     ...out.stool_features,
@@ -409,12 +485,12 @@ function buildFullResponse(partial: any) {
   };
 
   out.summary =
-    out.summary || "已给出参考分析与建议，如症状加重请及时就医。";
+    out.summary || summaryText;
   out.hydration_hint = out.hydration_hint || out.actions_today.hydration[0] || "";
   out.diet_advice = Array.isArray(out.diet_advice) ? out.diet_advice : out.actions_today.diet;
 
   out.uncertainty_note = lowConfidence
-    ? "识别置信度较低，以下为参考分析；建议下次拍更近更清晰。"
+    ? "图片清晰度/场景不典型，以下为参考分析。建议在光线充足、近距离、对焦清晰重新拍摄。"
     : out.uncertainty_note || "如症状持续或加重，请及时就医。";
 
   if (!out.image_validation || typeof out.image_validation !== "object") {
@@ -427,9 +503,16 @@ function buildFullResponse(partial: any) {
     out.image_validation = {
       ...out.image_validation,
       status: "low_confidence",
-      reason: "model_uncertain",
+      reason:
+        out.image_validation.reason === "uncertain_stool"
+          ? "uncertain_stool"
+          : "model_uncertain",
     };
   }
+  out.image_validation.stool_confidence = out.stool_confidence;
+  out.image_validation.stool_scene = out.stool_scene || "unknown";
+  out.image_validation.stool_form_hint = out.stool_form_hint || "unknown";
+  out.request_id = out.request_id || out.openai_request_id || "";
 
   return out;
 }
@@ -762,30 +845,18 @@ function applyNonStoolOverrides(out: any, contextAffects: string[]) {
   return out;
 }
 
-function applyNotStoolDecision(out: any, reason: string) {
-  out.ok = false;
-  out.is_stool_image = false;
-  out.error_code = "NOT_STOOL_IMAGE";
-  out.error = "NOT_STOOL_IMAGE";
-  out.not_stool_reason = reason || out.not_stool_reason || "未识别到大便图像。";
-  out.image_validation = {
-    status: "not_stool",
-    reason: out.not_stool_reason,
-    tips: ["对焦清晰", "光线充足", "目标占画面 50% 以上"],
-  };
-  out.headline = out.headline || "这张图片未识别到大便，暂时无法分析";
-  return out;
-}
-
 function applyLowConfidenceDecision(out: any, reason: string) {
   out.is_stool_image = true;
   out.confidence = Math.min(out.confidence || 1, 0.4);
   out.uncertainty_note =
-    "识别置信度较低，以下为参考分析；建议下次拍更近更清晰。";
+    "图片清晰度/场景不典型，以下为参考分析。建议在光线充足、近距离、对焦清晰重新拍摄。";
+  const tips = Array.isArray(out.image_validation?.tips) && out.image_validation.tips.length
+    ? out.image_validation.tips
+    : ["光线充足", "对焦清晰", "近距离", "目标占画面 50% 以上"];
   out.image_validation = {
     status: "low_confidence",
-    reason: "model_uncertain",
-    tips: ["光线充足", "对焦清晰", "目标占画面 50% 以上"],
+    reason: reason || "model_uncertain",
+    tips,
     stool_confidence: out.stool_confidence,
     stool_scene: out.stool_scene || "unknown",
     stool_form_hint: out.stool_form_hint || "unknown",
@@ -803,6 +874,21 @@ function applyDecisionAndLog(
   const decision = computeDetectDecision(out, userConfirmed);
   let normalized = out;
   if (decision.decision === "proceed_low_confidence") {
+    if (decision.reason === "force_analyze_uncertain_stool") {
+      normalized.is_stool_image = true;
+      normalized.stool_confidence = 0;
+      normalized.image_validation = {
+        ...(normalized.image_validation || {}),
+        status: "low_confidence",
+        reason: "uncertain_stool",
+        tips: [
+          "光线充足",
+          "对焦清晰",
+          "近距离",
+          "目标占画面 50% 以上",
+        ],
+      };
+    }
     normalized = applyLowConfidenceDecision(
       normalized,
       decision.validationReason || decision.reason
@@ -842,20 +928,22 @@ function computeDetectDecision(out: any, userConfirmed: boolean): {
     }
     return { decision: "proceed_analysis", reason: "stool_image_true", validationReason: "", conf };
   }
-  if (out.is_stool_image === false) {
-    if (userConfirmed) {
-      return {
-        decision: "proceed_low_confidence",
-        reason: "user_confirmed_stool_force_analysis",
-        validationReason: "user_confirmed_stool",
-        conf,
-      };
-    }
-    const status = out?.image_validation?.status;
+  if (
+    out?.image_validation?.status === "not_stool" &&
+    out?.image_validation?.reason === "image_validation_not_stool"
+  ) {
     return {
       decision: "proceed_low_confidence",
-      reason: status === "not_stool" ? "image_validation_not_stool" : "not_stool_but_uncertain",
-      validationReason: status === "not_stool" ? "image_validation_not_stool" : "not_stool_but_uncertain",
+      reason: "force_analyze_uncertain_stool",
+      validationReason: "uncertain_stool",
+      conf,
+    };
+  }
+  if (out.is_stool_image === false || out?.image_validation?.status === "not_stool") {
+    return {
+      decision: "proceed_low_confidence",
+      reason: "not_stool_but_uncertain",
+      validationReason: "uncertain_stool",
       conf,
     };
   }
@@ -884,7 +972,7 @@ function truncateLogText(value: unknown, limit = 200) {
 function logDetect(
   out: any,
   requestId: string,
-  decision: "block_not_stool" | "proceed_analysis" | "proceed_low_confidence",
+  decision: "proceed_analysis" | "proceed_low_confidence",
   decisionReason: string
 ) {
   const validation = out?.image_validation || {};
@@ -1686,7 +1774,7 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          normalized = buildFullResponse(normalized);
+          normalized = buildFullResponse(normalized, { forceOk: false });
           return json(normalized, 200, baseHeaders);
         }
 
@@ -1739,13 +1827,13 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          normalized = buildFullResponse(normalized);
+          normalized = buildFullResponse(normalized, { forceOk: false });
           return json(normalized, 200, baseHeaders);
         }
 
         const imageBytes = decodeBase64Image(image);
         const dims = imageBytes ? getImageDimensions(imageBytes) : null;
-        if (!imageBytes || !dims || dims.width < 512 || dims.height < 512) {
+        if (!imageBytes || !dims) {
           const invalid = buildInvalidImageResult(workerVersion, rayId || undefined);
           let normalized = normalizeV2(invalid, workerVersion);
           normalized.input_echo = { context };
@@ -1755,8 +1843,13 @@ export default {
             contextAffectsFromInput(context),
             requestId
           );
-          normalized = buildFullResponse(normalized);
+          normalized = buildFullResponse(normalized, { forceOk: false });
           return json(normalized, 200, baseHeaders);
+        }
+        if (dims.width < 512 || dims.height < 512) {
+          console.log(
+            `[RID:${requestId}] [ANALYZE] small image dims=${dims.width}x${dims.height}`
+          );
         }
 
         const proxyUrl =
